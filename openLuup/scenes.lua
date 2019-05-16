@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "openLuup.scenes",
-  VERSION       = "2019.05,10",
+  VERSION       = "2019.05.15",
   DESCRIPTION   = "openLuup SCENES",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2019 AKBooer",
@@ -56,6 +56,7 @@ local ABOUT = {
 
 -- 2019.04.18   syntax change to job name
 -- 2019.05.10   only create scene timers job if scene not paused!
+-- 2019.05.15   reinstate scene_watcher to use device states to indicate scene active
 
 
 local logs      = require "openLuup.logs"
@@ -92,6 +93,9 @@ local trigger_warning = {   -- template points to openLuup notification message
   name = "*** WARNING ***",
   template = "1",
 }
+
+-- scene-wide variables
+local watched_devices = {}      -- table of watched devices indexed by device number 
 
 ---
 --- utilities
@@ -137,7 +141,44 @@ local function runs_in_current_mode (scene)
   return (modeStatus == "0") or modeStatus:match (currentMode)
 end
 
+-- get_actioned_devices()  returns a table of devices used by a scene
+local function get_actioned_devices(scene)      -- 2019.05.15
+  local devs = {}
+  for _, group in ipairs (scene.groups) do      -- schedule the various delay groups
+    for _, a in ipairs (group.actions) do
+      local devNo = tonumber (a.device)
+      if devNo then devs[devNo] = devNo end     -- use table, rather than list, to avoid duplicates
+    end
+  end
+  return devs
+end
 
+-- called when watched device variable changes
+local function watch_callback(devNo, service, variable, value_old, value_new)
+  local device = luup.devices[devNo]
+  if device then
+    _log ("device #" .. devNo, "luup.scenes.watch")
+    -- for each affected scene
+    -- get expected state
+    -- compare with current state
+    -- set running flag as necessary
+  end
+end
+
+-- start_watching_devices(),  possibly add new devices to watched list
+local function start_watching_devices(dlist)
+  for devNo in pairs(dlist) do
+    if not watched_devices[devNo] then    -- need to start watching this device
+      watched_devices[devNo] = devNo
+      -- start device watch
+      local silent = true
+      local device = luup.devices[devNo]
+      if device then 
+        devutil.variable_watch (device, watch_callback, nil, nil, "scene_watcher", silent) 
+      end
+    end
+  end
+end
 
 -- scene.create() - returns compiled scene object given json string containing group / timers / lua / ...
 local function create (scene_json)
@@ -375,6 +416,10 @@ local function create (scene_json)
       end
     end
   end
+  
+  -- start watching the actioned devices
+  local actioned = get_actioned_devices(scene)      -- 2019.05.15
+  start_watching_devices (actioned)
 
   devutil.new_userdata_dataversion ()               -- 2017.07.19
 

@@ -5,7 +5,7 @@ module(..., package.seeall)
 
 ABOUT = {
   NAME          = "console.lua",
-  VERSION       = "2019.05.12",
+  VERSION       = "2019.05.15",
   DESCRIPTION   = "console UI for openLuup",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2019 AKBooer",
@@ -61,6 +61,7 @@ ABOUT = {
 -- 2019.05.01  use page=render to wrap graphics
 -- 2019.05.02  rename startup page to plugins and include cpu usage
 -- 2019.05.10  use new device:get_shortcodes() in device_states()
+-- 2019.05.15  add number of callbacks to Delay and Watch tables
 
 
 -- TODO: HTML pages with tabbed tables?
@@ -96,10 +97,6 @@ local date = "%Y-%m-%d %H:%M:%S"
 
 local function todate (epoch)
   return os.date (date, epoch)
-end
-
-local function cpu_ms (cpu)
-  return string.format ("%0.3f", cpu * 1000)
 end
 
 local function rhs (text)
@@ -239,14 +236,16 @@ end
 
 local function delaylist ()
   local t = html5.table()
-  t.header {"#", "date / time", "device", "status", "hh:mm:ss", "info"}
+  t.header {"#", "date / time", "device", "status", "#calls",  "hh:mm:ss", "info"}
   local dlist = {}
   for _,b in pairs (scheduler.delay_list()) do
     local delay = math.floor (b.delay + 0.5)
-    dlist[#dlist+1] = {b.time, todate(b.time), b.devNo, "Delay", delay, "callback: " .. (b.type or '')}
+    local calls = scheduler.delay_log[tostring(b.callback)] or 0
+    dlist[#dlist+1] = {b.time, todate(b.time), b.devNo, 
+      "Delay", calls, dhms(delay), "callback: " .. (b.type or '')}
   end
   for _, row in ipairs (sort_and_number(dlist)) do
-    row[5] = rhs (dhms(row[5]))
+    row[6] = rhs(row[6])
     t.row (row)
   end
   local div = html5.div {html5_title "Delayed Callbacks", t}
@@ -299,7 +298,8 @@ local function watchlist ()
   local function isW (w, d,s,v)
     if next (w.watchers) then
       for _, what in ipairs (w.watchers) do
-        W[#W+1] = {what.devNo, what.devNo, what.name or '?', table.concat ({d,s or '*',v or '*'}, '.')}
+        local calls = scheduler.watch_log[what.hash] or 0
+        W[#W+1] = {what.devNo, what.devNo, what.name or '?', calls, table.concat ({d,s or '*',v or '*'}, '.')}
       end
     end
   end
@@ -315,7 +315,7 @@ local function watchlist ()
   end
 
   local t = html5.table()
-  t.header {'#', "dev", "callback", "watching"}
+  t.header {'#', "dev", "callback", "#calls", "watching"}
   for _, row in ipairs (sort_and_number(W)) do
     t.row (row)
   end
