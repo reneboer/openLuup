@@ -529,7 +529,6 @@ local function respond (request, ...)
   if client.closed then return end    -- 2018.04.12 don't bother to try and respond to closed socket!
   
   local headers, response, chunked = http_response (...)
-  
   send (client, headers)
   
   local ok, err, nc
@@ -538,12 +537,6 @@ local function respond (request, ...)
   else
     ok, err, nc = send (client, response)
   end
-  
---  if not ok then
---    local pretty = require "pretty"
---    local a,b = pretty {request = request, response_headers = headers}
---    _log (a or b)
---  end
   
   local t = math.floor (1000*(socket.gettime() - request.request_start))
   local completed = "request completed (%d bytes, %d chunks, %d ms) %s"
