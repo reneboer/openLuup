@@ -1620,6 +1620,8 @@ local function dynamic_menu ()
   return menus
 end
 
+local stylesheet = "w3.css"
+if not loader.raw_read "w3.css" then stylesheet = "https://www.w3schools.com/w3css/4/w3.css" end
 
 ----------------------------------------
 -- run()
@@ -1647,11 +1649,9 @@ function run (wsapi_env)
   
   local html = html5.document { 
     html5.title {script: match "(%w+)$"},
-  [[
-  
-    <meta charset="utf-8" name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="w3.css">
-  ]],
+    '<meta charset="utf-8" name="viewport" content="width=device-width, initial-scale=1">',
+    '<link rel="stylesheet" href="', stylesheet, '">',
+    
     html5.style {
 [[  
   pre {line-height: 1.1; font-size:10pt;}
