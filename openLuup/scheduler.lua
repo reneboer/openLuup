@@ -1,13 +1,13 @@
 local ABOUT = {
   NAME          = "openLuup.scheduler",
-  VERSION       = "2019.05.15",
+  VERSION       = "2020.01.25",
   DESCRIPTION   = "openLuup job scheduler",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -59,6 +59,12 @@ local ABOUT = {
 -- 2019.05.01  measure cpu time used by device
 -- 2019.05.10  correct expiry time handling and refine kill_job()
 -- 2019.05.15  log the number of callbacks for call_delay() and variable_watch()
+-- 2019.07.22  add error_state table for jobs
+-- 2019.10.14  add device number to context_switch error message, thanks @Buxton
+-- 2019.11.02  order local job list by priority (to allow VerBridge to start before other plugins)
+-- 2019.11.08  use numerical priority (0 high, inf low, nil lowest), add jobNo to job structure
+
+-- 2020.01.25  improve watch callback log message, adding device contaxt and callback name
 
 
 local logs      = require "openLuup.logs"
@@ -174,11 +180,12 @@ local function context_switch (devNo, fct, ...)
       total_cpu = total_cpu + cpu   
     end
     --
-    current_device = old                        -- restore old device context
     if not ok then
       msg = tostring(msg or '?')                -- 2019.04.19 make sure that string error is returned
-      _log (" ERROR: " .. msg, "openLuup.context_switch")  -- 2018.08.04 
+      local errmsg = " ERROR: [dev #%s] %s"     -- 2019.10.14 add device number, thanks @Buxton
+      _log (errmsg: format (current_device or '0', msg), "openLuup.context_switch")  -- 2018.08.04 
     end
+    current_device = old                        -- restore old device context
     return ok, msg, ... 
   end
   return restore (pcall (fct, ...))
@@ -204,6 +211,11 @@ local state =  {
 local valid_state = {}
 for _,s in pairs (state) do valid_state[s] = s end
 
+local error_state = {
+  [state.Error]       = true, 
+  [state.Aborted]     = true,
+}
+
 local exit_state = {
   [state.Error]       = true, 
   [state.Aborted]     = true,
@@ -223,7 +235,7 @@ local wait_state = {
 -- LOCALS
 
 local next_job_number = 1
-local startup_list = {}
+local startup_list = {}   -- 2019.11.08 note that this is now an ordered list, not indexed by jobNo
 
 local job_list = setmetatable ( 
     {},      -- jobs indexed by job number
@@ -377,7 +389,7 @@ end
 
 -- create a job and schedule it to run
 -- arguments is a table of name-value pairs, devNo is the device number
-local function create_job (action, arguments, devNo, target_device)
+local function create_job (action, arguments, devNo, target_device, priority)
   local jobNo = next_job_number
   next_job_number = next_job_number + 1
   
@@ -385,12 +397,14 @@ local function create_job (action, arguments, devNo, target_device)
     {              -- this is the job structure
       arguments   = {},
       devNo       = devNo,              -- system jobs may have no device number
+      jobNo       = jobNo,              -- 2019.11.08
       status      = state.WaitingToStart,
       notes       =  '',                -- job 'notes' are 'comments'?
       timeout     = 0,
       type        = nil,                -- used in request id=status, and possibly elsewhere
       expiry      = timenow(),          -- time to go
       target      = target_device,
+      priority    = priority,
       settings    = {},                 -- 2017.05.01  user-defined parameter list
       -- job tag entry points
       tag = {
@@ -490,7 +504,7 @@ local function kill_job (jobNo)
 end
 
 
-local function device_start (entry_point, devNo, name)
+local function device_start (entry_point, devNo, name, priority)
   -- job wrapper for device initialisation
   local function startup_job (_,_,job)       -- note that user code is run in protected mode
     local label = ("[%s] %s device startup"): format (tostring(devNo), name or '')
@@ -504,11 +518,11 @@ local function device_start (entry_point, devNo, name)
     return (a == false) and state.Error or state.Done, 0      -- 2019.05.03 reflect startup job exit status
   end
   
-  local jobNo = create_job ({job = startup_job}, {}, devNo)
+  local jobNo = create_job ({job = startup_job}, {}, devNo, nil, priority)
   local job = job_list[jobNo]
   local text = "plugin: %s"
   job.type = text: format ((name or ''): match "^%s*(.+)")
-  startup_list[jobNo] = job  -- put this into the startup job list too 
+  startup_list[#startup_list+1] = job  -- put this into the startup job list too 
   return jobNo
 end    
 
@@ -518,39 +532,54 @@ local function task_callbacks ()
   repeat
     N = N + 1
     local njn = next_job_number
-  
-    local local_job_list = {}
-    do
-      for jobNo, job in pairs (job_list) do 
-        local_job_list[jobNo] = job  -- make local copy: list might be changed by jobs spawning
+    local local_job_list          -- make local copy: list might be changed by jobs spawning, and for priority
+    
+    do  -- 2019.11.02  order local job list by priority
+        -- priority is a number (not necessarily integer) with smaller numbers having higher priority, nil is lowest
+        -- this affects both the order of device startup, and also prioritization of subsequent time slices
+      local_job_list = {}
+      local no_priority = {}
+      for jobNo, job in pairs (job_list) do
+        if job.priority then 
+          local_job_list[#local_job_list+1] = jobNo     -- insert at front
+        else
+          no_priority[#no_priority+1] = jobNo           -- insert at end
+        end
+      end
+      table.sort (local_job_list, function(a,b) return job_list[a].priority < job_list[b].priority end)
+      for _, j in ipairs(no_priority) do
+        local_job_list[#local_job_list+1] = j         -- add remaining un-prioritised jobs
       end
     end
   
-    for jobNo, job in pairs (local_job_list) do 
-      
-      job.now = timenow()
-      
-      if job.status == state.WaitingToStart and job.now >= job.expiry then
-        job.status = state.InProgress   -- wake up after timeout period
-      end
-
-      if run_state[job.status] then
-        job.status = state.InProgress   
-        job: dispatch "job"       
-      end
-   
-      if wait_state[job.status] then
-        local incoming = false
-        if incoming then          -- TODO: get 'incoming' status to do the right thing
-          job: dispatch "incoming"
-        elseif job.now > job.expiry then
-          job: dispatch "timeout"         
+    for _, jobNo in ipairs (local_job_list) do      -- go through local list in priority order
+      local job = job_list[jobNo]
+      if job then
+        job.now = timenow()
+        job.started = job.started or job.now        -- 2019.11.09 add start time
+        
+        if job.status == state.WaitingToStart and job.now >= job.expiry then
+          job.status = state.InProgress   -- wake up after timeout period
         end
-      end
 
-      job.now = timenow()        -- 2017.05.05  update, since dispatched job may have taken a while
-      if exit_state[job.status] and job.now > job.expiry + job_linger then  -- 2019.05.10
-        job_list[jobNo] = nil   -- remove the job entirely from the actual job list (not local_job_list)
+        if run_state[job.status] then
+          job.status = state.InProgress   
+          job: dispatch "job"       
+        end
+     
+        if wait_state[job.status] then
+          local incoming = false
+          if incoming then          -- TODO: get 'incoming' status to do the right thing
+            job: dispatch "incoming"
+          elseif job.now > job.expiry then
+            job: dispatch "timeout"         
+          end
+        end
+
+        job.now = timenow()        -- 2017.05.05  update, since dispatched job may have taken a while
+        if exit_state[job.status] and job.now > job.expiry + job_linger then  -- 2019.05.10
+          job_list[jobNo] = nil   -- remove the job entirely from the actual job list (not local_job_list)
+        end
       end
     end
   until njn == next_job_number        -- keep going until no more new jobs queued
@@ -596,12 +625,14 @@ local function luup_callbacks ()
     N = N + 1
     local old_watch_list = watch_list
     watch_list = {}                       -- new list, because callbacks may change some variables!
+    local log_message = "%s.%s.%s called [%s]%s() %s"
     for _, callback in ipairs (old_watch_list) do
       for _, watcher in ipairs (callback.watchers) do   -- single variable may have multiple watchers
         local var = callback.var
         local user_callback = watcher.callback
         if not watcher.silent then
-          _log (("%s.%s.%s %s"): format(var.dev, var.srv, var.name, tostring (user_callback)), 
+          _log (log_message: format(var.dev, var.srv, var.name, 
+                      watcher.devNo or 0, watcher.name or "anon", tostring (user_callback)), 
                   "luup.watch_callback") 
         end
         local ok, msg = context_switch (watcher.devNo, user_callback, 
@@ -667,6 +698,7 @@ return {
     
     -- constants
     state             = state,
+    error_state       = error_state,
     exit_state        = exit_state,
     run_state         = run_state,
     wait_state        = wait_state,

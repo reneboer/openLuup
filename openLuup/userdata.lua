@@ -1,13 +1,13 @@
 local ABOUT = {
   NAME          = "openLuup.userdata",
-  VERSION       = "2019.06.06",
+  VERSION       = "2020.03.31",
   DESCRIPTION   = "user_data saving and loading, plus utility functions used by HTTP requests",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -65,6 +65,13 @@ local ABOUT = {
 -- 2019.05.03   don't load device attribute cpu(s)
 -- 2019.05.12   use device:state_table() in devices_table()
 -- 2019.05.31   update openLuup help URL to new Vera community forum
+-- 2019.08.25   use local .svg icons for openLuup, AltAppStore, and VeraBridge plugins
+-- 2019.10.19   add modelID attribute, per latest Vera firmware (7.30)
+-- 2019.11.28   add openLuup table to saved user_data (for continuity of parameter settings between reloads)
+
+-- 2020.01.28   replace scene:user_table() with scene.definition, following object changes in scenes
+-- 2020.03.03   update ZWay implementation file to I_ZWay2.xml
+-- 2020.03.31   improve plugin loading and ordering
 
 
 local json    = require "openLuup.json"
@@ -157,6 +164,7 @@ luup.log "startup code completed"
   mode_change_mode = '',
   mode_change_time = '',
   model = "Not a Vera",
+  modelID = 0,
 --  net_pnp = "0",
 --  overview_tabs = {},
 --  rooms = {},
@@ -180,6 +188,10 @@ luup.log "startup code completed"
 -- openLuup specials
 
   ShutdownCode = '',
+  
+  LuaTestCode  = '',    -- 2019.06.11
+  LuaTestCode2 = '',
+  LuaTestCode3 = '',
 
 }
 
@@ -189,9 +201,6 @@ luup.log "startup code completed"
 --
 -- pre-installed plugins
 --
-
-local default_plugins_version = "2016.11.15"  --<<<-- change this to force update of default_plugins
-
 local preinstalled = {
   
   openLuup = 
@@ -199,12 +208,11 @@ local preinstalled = {
     {
       AllowMultiple   = "0",
       Title           = "openLuup",
-      Icon            = "https://avatars.githubusercontent.com/u/4962913",
+      Icon            = "https://avatars.githubusercontent.com/u/4962913",  -- AltUI seems to need HTTPS
       Instructions    = "https://community.getvera.com/c/plugins-and-plugin-development/openluup",
       AutoUpdate      = "0",
       VersionMajor    = '',
       VersionMinor    = "baseline.",
-      TargetVersion   = default_plugins_version,      -- openLuup uses this for the InstalledPlugins2 version number
       id              = "openLuup",
       timestamp       = os.time(),
       Files           = (function ()                  -- generate this list dynamically
@@ -223,40 +231,7 @@ local preinstalled = {
         folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
        },
     },
-
-  AltUI = 
-
-    {
-      AllowMultiple   = "0",
-      Title           = "Alternate UI",
-      Icon            = "plugins/icons/8246.png",     -- usage: http://apps.mios.com/icons/8246.png
-      Instructions    = "http://forum.micasaverde.com/index.php/board,78.0.html",
-      AutoUpdate      = "1",                          -- not really "auto", but will prompt on browser refresh
-      VersionMajor    = "not",
-      VersionMinor    = "installed",
-      id              = 8246,                         -- this is the genuine MiOS plugin number
-      timestamp       = os.time(),
-      Files           = {},                           -- populated on download from repository
-      Devices         = {
-        {
-          DeviceFileName  = "D_ALTUI.xml",
-          DeviceType      = "urn:schemas-upnp-org:device:altui:1",
-          ImplFile        = "I_ALTUI.xml",
-          Invisible       =  "0",
---          CategoryNum = "1"
-        },
-      },
-      Repository      = {     
-        type      = "GitHub",
-        source    = "amg0/ALTUI",                   -- @amg0 repository
-        pattern   = "ALTUI",                        -- pattern match string for required files
-        folders   = {                               -- these are the bits of the repository that we want
-          '',               -- the main folder
-          "/blockly",       -- and blocky editor
-        },
-      },
-    },
-
+  
   AltAppStore =
 
     {
@@ -320,6 +295,39 @@ local preinstalled = {
         folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
       },
     },
+
+  AltUI = 
+
+    {
+      AllowMultiple   = "0",
+      Title           = "Alternate UI",
+      Icon            = "plugins/icons/8246.png",     -- usage: http://apps.mios.com/icons/8246.png
+      Instructions    = "http://forum.micasaverde.com/index.php/board,78.0.html",
+      AutoUpdate      = "1",                          -- not really "auto", but will prompt on browser refresh
+      VersionMajor    = "not",
+      VersionMinor    = "installed",
+      id              = 8246,                         -- this is the genuine MiOS plugin number
+      timestamp       = os.time(),
+      Files           = {},                           -- populated on download from repository
+      Devices         = {
+        {
+          DeviceFileName  = "D_ALTUI.xml",
+          DeviceType      = "urn:schemas-upnp-org:device:altui:1",
+          ImplFile        = "I_ALTUI.xml",
+          Invisible       =  "0",
+--          CategoryNum = "1"
+        },
+      },
+      Repository      = {     
+        type      = "GitHub",
+        source    = "amg0/ALTUI",                   -- @amg0 repository
+        pattern   = "ALTUI",                        -- pattern match string for required files
+        folders   = {                               -- these are the bits of the repository that we want
+          '',               -- the main folder
+          "/blockly",       -- and blocky editor
+        },
+      },
+    },
   
   MySensors =
 
@@ -366,7 +374,7 @@ local preinstalled = {
         {
           DeviceFileName  = "D_ZWay.xml",
           DeviceType      = "urn:akbooer-com:device:ZWay:1",
-          ImplFile        = "I_ZWay.xml",
+          ImplFile        = "I_ZWay2.xml",
           Invisible       =  "0",
         },
       },
@@ -381,9 +389,9 @@ local preinstalled = {
 
 local default_plugins = {
     preinstalled.openLuup,
-    preinstalled.AltUI,
     preinstalled.AltAppStore,
     preinstalled.VeraBridge,
+    preinstalled.AltUI,
     preinstalled.ZWay,
     preinstalled.MySensors,
   }
@@ -392,12 +400,11 @@ local default_plugins = {
 -- PLUGINS
 --
 
--- given installed plugin structure, generate index by ID
+-- given plugin list, generate index by ID
 local function plugin_index (plugins)
   local index = {}
   for i,p in ipairs (plugins) do
-    local id = tostring (p.id)
-    if id then index[id] = i end
+    index[tostring (p.id)] = i
   end
   return index
 end
@@ -463,7 +470,6 @@ local function update_plugin_versions (installed)
     
     local parent = d.device_num_parent
     if IP and (parent == 0 or parent == 2) then   -- LOCAL devices only! (incl. children of openLuup)
-      
       if i and a then     -- plugins with ABOUT.VERSION
         local v1,v2,v3,prerelease = (a.VERSION or ''): match "(%d+)%D+(%d+)%D*(%d*)(%S*)"
         if v3 then
@@ -605,32 +611,32 @@ local function load_user_data (user_data_json)
     -- PLUGINS
     _log "loading installed plugin info..."
     
-    local installed = user_data.InstalledPlugins2 or {}
+--    local installed = user_data.InstalledPlugins2 or {}
+    local installed = {}
+    for i,p in ipairs (default_plugins) do installed[i] = p end   -- initialize installed plugins
     local index = plugin_index (installed)
     
-    -- check TargetVersion of openLuup to see if InstalledPlugins2 defaults are current   
-    local ol = installed[index.openLuup] or {}
-    local refresh = ol.TargetVersion ~= default_plugins_version
-    
-    -- copy any missing defaults (may have been deleted) to the new list
-    for _, default_plugin in ipairs (default_plugins) do
-      local existing = index[tostring(default_plugin.id)]
-      if not existing then 
-        installed[#installed+1] = default_plugin          -- add any missing defaults
-      elseif refresh then 
-      default_plugin.VersionMajor = installed[existing].VersionMajor  -- preserve version info
-      default_plugin.VersionMinor = installed[existing].VersionMinor
-      installed[existing] = default_plugin                -- out of date, so replace info anyway
+    -- add others
+    local protected = {openLuup = true, AltAppStore = true, VeraBridge = true}   -- don't mess with these
+    for _, plugin in ipairs (user_data.InstalledPlugins2 or {}) do
+      local existing = index[tostring(plugin.id)]
+      if existing then 
+        if not protected[plugin.id] then
+          installed[existing] = plugin              -- replace any existing, unprotected, plugin data
+        end
+      else
+        installed[#installed+1] = plugin            -- add any missing
       end
     end
-    -- log the full list of installed plugins
     update_plugin_versions (installed)
+    attr.InstalledPlugins2 = installed
+    
+    -- log the full list of installed plugins
     for _, plugin in ipairs (installed) do
       local version = table.concat {plugin.VersionMajor or '?', '.', plugin.VersionMinor or '?'}
       local ver = "[%s] %s (%s)"
       _log (ver: format (plugin.id, plugin.Title, version))
     end
-    attr.InstalledPlugins2 = installed
   end
   _log "...user_data loading completed"
   return not msg, msg
@@ -700,6 +706,8 @@ local function json_user_data (localLuup)   -- refactored thanks to @explorer
   for a,b in pairs (attributes) do
     if type(b) ~= "table" then data[a] = b end
   end
+  -- openLuup table attribute
+  data.openLuup = attributes.openLuup         -- 2019.11.28
   -- devices
   data.devices = devices_table (luup.devices or {})
   -- plugins
@@ -712,7 +720,7 @@ local function json_user_data (localLuup)   -- refactored thanks to @explorer
   -- scenes
   local scenes = data.scenes
   for _, s in pairs (luup.scenes or {}) do
-    scenes[#scenes+1] = s: user_table ()
+    scenes[#scenes+1] = s.definition
   end    
   --
   return json.encode (data)   -- json text or nil, error message if any

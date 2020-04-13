@@ -1,13 +1,13 @@
 ABOUT = {
   NAME          = "VeraBridge",
-  VERSION       = "2019.05.11",
+  VERSION       = "2020.03.14",
   DESCRIPTION   = "VeraBridge plugin for openLuup",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -104,6 +104,19 @@ ABOUT = {
 --              see: https://github.com/akbooer/openLuup/issues/16
 -- 2019.05.03   correct error and exit status on missing Vera in GetUserData()  (thanks @reneboer)
 -- 2019.05.11   use external http_async module
+-- 2019.10.22   add AsyncTimeout as watchdog timer for missing async responses (thanks @rafale77)
+--              see: https://community.getvera.com/t/openluup-suggestions/189405/166
+-- 2019.10.26   use actual implementation file for bridged devices, not 'X'
+-- 2019.11.03   fix async timeout request cascade error
+-- 2019.12.10   add sl_ prefix special case to UpdateVariables(), thanks @rigpapa
+--              see: https://community.getvera.com/t/reactor-on-altui-openluup-variable-updates-condition/211412/16
+-- 2019.12.12   CheckAllEveryNth added for user-selection of periodic status requests for all variables (0 = don't)
+--              see: https://community.getvera.com/t/reactor-on-altui-openluup-variable-updates-condition/211412/24
+
+-- 2020.01.21   Add POLL_ERRORS and POLL_TIMEOUTS globals to diagnose asynch callback failures
+-- 2020.02.05   Put missing devices into Room 101 (retaining them in scene triggers and actions)  (for @DesT)
+-- 2020.02.12   use existing Bridge offset, if defined (thanks @reneboer.)  New luup.openLuup.bridge.*()
+-- 2020.03.14   add 'host' attribute to all children to show that they come from a Vera
 
 
 local devNo                      -- our device number
@@ -123,6 +136,9 @@ POLL_DELAY = 5              -- number of seconds between remote polls
 POLL_MINIMUM = 0.5          -- minimum delay (s) for async polling
 POLL_MAXIMUM = 30           -- maximum delay (s) ditto
 
+POLL_ERRORS = 0
+POLL_TIMEOUTS = 0
+
 local local_room_index           -- bi-directional index of our rooms
 local remote_room_index          -- bi-directional of remote rooms
 
@@ -131,10 +147,12 @@ local PK_AccessPoint              -- ... ditto
 local LoadTime                    -- ... ditto
 
 local RemotePort                  -- port to access remote machine ("/port_3480" for Vera, ":3480" for openLuup)
-local AsyncPoll                   -- asynchronous polling
+local AsyncPoll, AsyncTimeout     -- asynchronous polling
+local CheckAllEveryNth            -- periodic status request for all variables
 
 local SID = {
   altui    = "urn:upnp-org:serviceId:altui1"  ,         -- Variables = 'DisplayLine1' and 'DisplayLine2'
+  bridge   = luup.openLuup.bridge.SID,                  -- for Remote_ID variable
   gateway  = "urn:akbooer-com:serviceId:VeraBridge1",
   hag      = "urn:micasaverde-com:serviceId:HomeAutomationGateway1",
 }
@@ -227,7 +245,7 @@ end
 -- mapping between remote and local device IDs
 
 local OFFSET                      -- offset to base of new device numbering scheme
-local BLOCKSIZE = 10000           -- size of each block of device and scene IDs allocated
+local BLOCKSIZE = luup.openLuup.bridge.BLOCKSIZE  -- size of each block of device and scene IDs allocated
 local Zwave = {}                  -- list of Zwave Controller IDs to map without device number translation
 
 local function local_by_remote_id (id) 
@@ -240,14 +258,11 @@ local function remote_by_local_id (id)
 end
 
 -- change parent of given device, and ensure that it handles child actions
-local function set_parent (devNo, newParent)
+local function set_parent_and_handle_children (devNo, newParent)
   local dev = luup.devices[devNo]
   if dev then
-    local meta = getmetatable(dev).__index
-    luup.log ("device[" .. devNo .. "] parent set to " .. newParent)
-    meta.handle_children = true                   -- handle Zwave actions
-    dev.device_num_parent = newParent             -- parent resides in two places under different names !!
-    dev.attributes.id_parent = newParent
+    dev.handle_children = true              -- handle Zwave actions
+    dev:set_parent (newParent)              -- parent resides in two places under different names !!
   end
 end
  
@@ -274,27 +289,6 @@ local function index_remote_rooms (rooms)    --<-- different structure
   return room_index
 end
 
--- make a list of our existing children, counting grand-children, etc.!!!
-local function existing_children (parent)
-  local c = {}
-  local function children_of (d,index)
-    for _, child in ipairs (index[d] or {}) do
-      c[child] = luup.devices[child]
-      children_of (child, index)
-    end
-  end
-  
-  local idx = {}
-  for child, dev in pairs (luup.devices) do
-    local num = dev.device_num_parent
-    local children = idx[num] or {}
-    children[#children+1] = child
-    idx[num] = children
-  end
-  children_of (parent, idx)
-  return c
-end
-
 -- create a new device, cloning the remote one
 local function create_new (cloneId, dev, room)
 --[[
@@ -312,7 +306,8 @@ local function create_new (cloneId, dev, room)
     json_file       = dev.device_json,
     description     = dev.name,
     upnp_file       = dev.device_file,
-    upnp_impl       = 'X',              -- override device file's implementation definition... musn't run here!
+--    upnp_impl       = 'X',              -- override device file's implementation definition... musn't run here!
+    upnp_impl       = dev.impl_file,
     parent          = devNo,
     password        = dev.password,
     room            = room, 
@@ -328,6 +323,7 @@ local function create_new (cloneId, dev, room)
   for _,name in ipairs (extras) do 
     attr[name] = dev[name]
   end
+  attr.host = "Vera"    -- 2020.03.14  show that we come from a Vera
   
   luup.devices[cloneId] = d   -- remember to put into the devices table! (chdev.create doesn't do that)
 end
@@ -341,10 +337,9 @@ local function build_families (devices)
     local clone  = luup.devices[cloneId]
     local parent = luup.devices[parentId]
     if clone and parent then
-      set_parent (cloneId, parentId)
+      set_parent_and_handle_children (cloneId, parentId)
     end
   end
---  existing_children (devNo)     -- TODO: TESTING ONLY 
 end
 
 -- return true if device is to be cloned
@@ -373,7 +368,7 @@ local function create_children (devices, room_0)
   local N = 0
   local list = {}           -- list of created or deleted devices (for logging)
   local something_changed = false
-  local current = existing_children (devNo)
+  local current = luup.openLuup.bridge.all_descendants (devNo)
   for _, dev in ipairs (devices) do   -- this 'devices' table is from the 'user_data' request
     dev.id = tonumber(dev.id)
     if is_to_be_cloned (dev) then
@@ -401,9 +396,16 @@ local function create_children (devices, room_0)
   
   list = {}
   for n in pairs (current) do
-    luup.devices[n] = nil       -- remove entirely!
-    something_changed = true
-    list[#list+1] = n
+--    luup.devices[n] = nil       -- remove entirely!
+--    something_changed = true
+--    list[#list+1] = n
+-- 2020.02.05, put into Room 101, instead of deleting, in order to retain information in scene triggers and actions
+    if not luup.rooms[101] then luup.rooms.create ("Room 101", 101) end 
+    local dev = luup.devices[n]
+    dev: rename (nil, 101)            -- move to Room 101
+    dev: attr_set ("disabled", 1)     -- and make sure it doesn't run (shouldn't anyway, because it is a child device)
+--
+--
   end
   if #list > 0 then luup.log ("deleting device numbers: " .. json.encode(list)) end
   
@@ -532,7 +534,7 @@ local function UpdateVariables(devices)
       device: status_set (dev.status)      -- 2016.04.29 set the overall device status
       for _, v in ipairs (dev.states) do
         local value = luup.variable_get (v.service, v.variable, i)
-        if v.value ~= value then
+        if (v.value ~= value) or (v.variable: sub(1,3) == "sl_") then   -- 2019.12.10  add sl_ prefix special case
           luup.variable_set (v.service, v.variable, v.value, i)
           update = true
         end
@@ -604,10 +606,16 @@ do
   local log = "VeraBridge ASYNC callback status: %s, #data: %s"
   local erm = "VeraBridge ASYNC request: %s"
   
+  local function increment_poll_count ()                        -- 2019.12.12
+    local every = tonumber (CheckAllEveryNth) or 0
+    poll_count = poll_count + 1
+    if every > 0 then poll_count = poll_count % every end       -- wrap every N
+  end
+  
   -- original short polling
   
   function VeraBridge_delay_callback ()
-    poll_count = (poll_count + 1) % 10            -- wrap every 10
+    increment_poll_count ()
     if poll_count == 0 then DataVersion = '' end  -- .. and go for the complete list (in case we missed any)
     local url = "/data_request?id=status2&output_format=json&DataVersion=" .. DataVersion 
     local status, j = remote_request (url)
@@ -617,8 +625,11 @@ do
 
   -- 2019.03.14   long polling, this is the way that the lu_status request is supposed to be used     
 
+  local last_async_call
+  
   function VeraBridge_async_request (init)
-    poll_count = (poll_count + 1) % 20                                    -- wrap every 20 ...
+    last_async_call = os.time()
+    increment_poll_count ()
     if init == "INIT" or poll_count == 0 then DataVersion = '' end        -- .. and go for the complete list 
     
     local url = uri: format ("http://", ip, RemotePort, POLL_MAXIMUM, DataVersion)
@@ -626,6 +637,7 @@ do
   
     if not ok then -- we will never be called again, unless we do something about it
       luup.log (erm: format (tostring(err)))                              -- report error...
+      POLL_ERRORS = POLL_ERRORS + 1
       luup.call_delay ("VeraBridge_async_request", POLL_DELAY, "INIT")    -- ...and reschedule ourselves to try again
     end
   end
@@ -644,23 +656,14 @@ do
     luup.call_delay ("VeraBridge_async_request", delay, init)    -- schedule next request
   end
 
-end
-
--- find other bridges in order to establish base device number for cloned devices
-local function findOffset ()
-  local offset
-  local my_type = luup.devices[devNo].device_type
-  local bridges = {}      -- devNos of ALL bridges
-  for d, dev in pairs (luup.devices) do
-    if dev.device_type == my_type then
-      bridges[#bridges + 1] = d
+  function VeraBridge_async_watchdog (timeout)
+    if (last_async_call + timeout) < os.time() then
+      POLL_TIMEOUTS = POLL_TIMEOUTS + 1
+      VeraBridge_async_request ()                     -- throw in another call, just in case we missed one
     end
+    luup.call_delay ("VeraBridge_async_watchdog", timeout, timeout)
   end
-  table.sort (bridges)      -- sort into ascending order by deviceNo
-  for d, n in ipairs (bridges) do
-    if n == devNo then offset = d end
-  end
-  return offset * BLOCKSIZE   -- every remote machine starts in a new block of devices
+
 end
 
 -- logged request
@@ -952,7 +955,12 @@ function init (lul_device)
   ip = luup.attr_get ("ip", devNo)
   luup.log (ip)
   
-  OFFSET = findOffset ()
+  -------
+  -- 2020.02.12 use existing Bridge offset, if defined.
+  -- this way, it doesn't matter if other bridges get deleted, we keep the same value
+  -- see: https://community.getvera.com/t/openluup-suggestions/189405/199
+  
+  OFFSET = tonumber (getVar "Offset") or luup.openLuup.bridge.nextIdBlock()
   setVar ("Offset", OFFSET)                     -- 2018.06.04  Expose OFFSET as device variable
   luup.log ("device clone numbering starts at " .. OFFSET)
 
@@ -965,8 +973,10 @@ function init (lul_device)
   Excluded    = uiVar ("ExcludeDevices", '')    -- list of devices to exclude from synchronization by VeraBridge, 
                                                 -- ...takes precedence over the first two.
                                               
-  RemotePort  = uiVar ("RemotePort", "/port_3480")
-  AsyncPoll   = uiVar ("AsyncPoll", "false")    -- set to "true" to use ansynchronous polling of remote Vera
+  RemotePort    = uiVar ("RemotePort", "/port_3480")
+  AsyncPoll     = uiVar ("AsyncPoll", "false")        -- set to "true" to use ansynchronous polling of remote Vera
+  AsyncTimeout  = uiVar ("AsyncTimeout", 300)         -- watchdog timer for lost async requests (seconds)
+  CheckAllEveryNth = uiVar ("CheckAllEveryNth", 20)   -- periodic request for ALL variables to check status
   
   local hmm = uiVar ("HouseModeMirror",HouseModeOptions['0'])   -- 2016.05.23
   HouseModeMirror = hmm: match "^([012])" or '0'
@@ -981,9 +991,8 @@ function init (lul_device)
   
   -- map remote Zwave controller device if we are the primary VeraBridge 
   if OFFSET == BLOCKSIZE then 
-    Zwave = {1}                   -- device IDs for mapping (same value on local and remote)
-    set_parent (1, devNo)         -- ensure Zwave controller is an existing child 
-
+    Zwave = {1}                                 -- device IDs for mapping (same value on local and remote)
+    set_parent_and_handle_children (1, devNo)   -- ensure Zwave controller is an existing child 
     luup.log "VeraBridge maps remote Zwave controller"
   end
 
@@ -1001,9 +1010,10 @@ function init (lul_device)
   
   local status = true
   local status_msg = "OK"
-  if PK_AccessPoint then                          -- 2018.07.29   only start up when valid PK_AccessPoint
-    setVar ("PK_AccessPoint", PK_AccessPoint)     -- 2018.06.04   Expose PK_AccessPoint as device variable
-    setVar ("LoadTime", LoadTime or 0)            -- 2019.03.18
+  if PK_AccessPoint then                              -- 2018.07.29   only start up when valid PK_AccessPoint
+    setVar ("PK_AccessPoint", PK_AccessPoint)         -- 2018.06.04   Expose PK_AccessPoint as device variable
+    setVar ("Remote_ID", PK_AccessPoint, SID.bridge)  -- 2020.02.12   duplicate above as unique remote ID
+    setVar ("LoadTime", LoadTime or 0)                -- 2019.03.18
     
     setVar ("DisplayLine1", Ndev.." devices, " .. Nscn .. " scenes", SID.altui)
     setVar ("DisplayLine2", ip, SID.altui)        -- 2018.03.02
@@ -1011,6 +1021,7 @@ function init (lul_device)
     if Ndev > 0 or Nscn > 0 then
       if logical_true (AsyncPoll) then
         VeraBridge_async_request "INIT"
+        VeraBridge_async_watchdog (AsyncTimeout)
       else
         VeraBridge_delay_callback ()
       end

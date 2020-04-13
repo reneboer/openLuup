@@ -4,7 +4,7 @@ module(..., package.seeall)
 
 ABOUT = {
   NAME          = "graphite_cgi",
-  VERSION       = "2019.06.06",
+  VERSION       = "2019.08.12",
   DESCRIPTION   = "WSAPI CGI implementation of Graphite-API",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2019 AKBooer",
@@ -47,6 +47,8 @@ ABOUT = {
 -- 2019.04.07  add yMin, yMax, title, vtitle, options to SVG render
 -- 2019.04.26  return "No Data" SVG when target parameter absent (default Graphite behaviour)
 -- 2019.06.06  remove reference to external CSS
+-- 2019.07.14  use new HTML and SVG constructors
+-- 2019.08.12  use WSAPI request library to decode parameters
 
 
 -- CGI implementation of Graphite API
@@ -85,11 +87,11 @@ I've written a finder specifically for the dataMine database, to replace the exi
 local url       = require "socket.url"
 local luup      = require "openLuup.luup"
 local json      = require "openLuup.json"
---local vfs       = require "openLuup.virtualfilesystem"    -- for Graphite CSS
 local historian = require "openLuup.historian"
 local timers    = require "openLuup.timers"
-
-local html5     = require "openLuup.xml" .html5
+local xml       = require "openLuup.xml"
+local wsapi     = require "openLuup.wsapi"                -- for request and response libraries
+--local vfs       = require "openLuup.virtualfilesystem"    -- for external Graphite CSS
 
 local isFinders, finders = pcall (require, "L_DataFinders")  -- only present if DataYours there
 
@@ -563,16 +565,18 @@ local function svgRender (_, p)
   -- fetch the data
   
   local svgs = {}   -- separate SVGs for multiple plots
-  local body, div, head, h4, style, title = html5.body, html5.div, html5.head, html5.h4, html5.style, html5.title
-  local span = html5.span
   
   local function timeformat (epoch)
     local t = os.date ("%d %b '%y, %X", epoch):gsub ("^0", '')
     return t
   end
+  
+  -- get the convenience factory methods for HTML and SVG
+  local h = xml.createHTMLDocument "Graphics"
+  local s = xml.createSVGDocument {}
 
   local function new_plot ()
-    return html5.svg {
+    return s.svg {
         height = p.height or "300px", 
         width = p.width or "90%",
         viewBox = table.concat ({0, -Yscale/10, Xscale, 1.1 * Yscale}, ' '),
@@ -581,20 +585,20 @@ local function svgRender (_, p)
       }
   end
   
-  local function no_data (s)
-    return s:text (2000, Yscale/2, {"No Data",     -- TODO: move to external style sheet
-          style = "font-size:180pt; fill:Crimson; font-family:Arial; transform:scale(2,1)"} )
+  local function no_data (svg)
+    svg:appendChild (s.text (2000, Yscale/2, {"No Data",     -- TODO: move to external style sheet?
+          style = "font-size:180pt; fill:Crimson; font-family:Arial; transform:scale(2,1)"} ) )   
   end
   
   for name, tv in target (p).next() do
     
     local T, V = scale (tv)
-    local s = new_plot ()
- 
+    local svg = new_plot ()
     if not T then
-      no_data (s)    
+      no_data (svg)   
     else
       -- construct the data rows for plotting  
+      local d = {}    -- i.e. s.createDocumentFragment ()
          
       local floor = math.floor
       
@@ -607,48 +611,53 @@ local function svgRender (_, p)
         local T2, V2 = T[i], V[i]
         local t2, v2 = floor ((T2-Tmin) * Tscale), floor((V2-Vmin) * Vscale)
         local T2_label = timeformat (T2)
-        local popup = s:title {{T1_label, ' - ', T2_label, '\n', name, ": ", V1 - V1%0.001}}
-        s:rect (t1, Yscale-v1, t2-t1, v1, {class="bar", popup})
-        t1, v1, T1, V1, T1_label = t2, v2, T2, V2, T2_label
+        local V3 = V1 + 5e-4
+        local popup = s.title {T1_label, ' - ', T2_label, '\n', name, ": ", (V3 - V3 % 0.001)}
+        d[#d+1] = s.rect (t1, Yscale-v1, t2-t1, v1, {class="bar", popup})
+                          t1, v1, T1, V1, T1_label = t2, v2, T2, V2, T2_label
       end
       
       -- add the axes
       for _,y in ipairs (V.ticks) do
         -- need to scale
         local v = Yscale - floor((y-Vmin) * Vscale)
-        s: line (0, v, Xscale, v, {style = "stroke:Grey; stroke-width:2"})
-        s: text (0, v, {dy="-0.2em", style = "font-size:48pt; fill:Grey; font-family:Arial; transform:scale(2,1)", y})
+        d[#d+1] = s.line (0, v, Xscale, v, {style = "stroke:Grey; stroke-width:2"})
+        d[#d+1] = s.text (0, v, {dy="-0.2em", style = "font-size:48pt; fill:Grey; font-family:Arial; transform:scale(2,1)", y})
       end
-      local br = html5.br {}
-      local left  = span {style="float:left",  timeformat (T.min)}
-      local right = span {style="float:right", timeformat (T.max)}
-      local hscale = html5.p {style="margin-left: 5%; margin-right: 5%; color:Grey; font-family:Arial; ", left, right, br}
-      s = html5.div {p.vtitle or '', s, br, hscale}
+      local left  = h.span {style="float:left",  timeformat (T.min)}
+      local right = h.span {style="float:right", timeformat (T.max)}
+      local hscale = h.p {style="margin-left: 5%; margin-right: 5%; color:Grey; font-family:Arial; ", 
+                  left, right, h.br ()}
+      svg:appendChild (d)
+      svg = h.div {p.vtitle or '', svg, h.br(), hscale}
     end
     
-    svgs[#svgs+1] = div {h4 {p.title or name, style="font-family: Arial;"}, s}
+    svgs[#svgs+1] = h.div {h.h4 {p.title or name, style="font-family: Arial;"}, svg}
   end
   
   if #svgs == 0 then          -- 2019.04.26
-    local s = new_plot ()
-    no_data (s)
-    svgs[1] = s
+    local svg = new_plot ()
+    no_data (svg)
+    svgs[1] = svg
   end
   
 -- add the options    
   local cpu = timers.cpu_clock ()
-  local doc = html5.document {
-    head {'<meta charset="utf-8">',
-      title {"Graphics"},
-      style {[[
-  .bar {cursor: crosshair; }
-  .bar:hover, .bar:focus {fill: DarkGray; }
-  rect {fill:Grey; stroke-width:3px; stroke:Grey; }
-]]},  -- was LightSteelBlue
-    body (svgs)}}
+  
+  h.documentElement[1]:appendChild {    -- append to <HEAD>
+        h.meta {charset="utf-8"},
+        h.style {[[
+    .bar {cursor: crosshair; }
+    .bar:hover, .bar:focus {fill: DarkGray; }
+    rect {fill:Grey; stroke-width:3px; stroke:Grey; }
+  ]]}}
+
+  h.body:appendChild (svgs)
+
+  local doc = tostring (h)
+  
   cpu = timers.cpu_clock () - cpu
 
---  local render = "render: CPU = %.3f mS for %dx%d=%d points"
   local render = "render: CPU = %.3f ms"
   _debug (render: format (cpu*1e3))
   return doc, 200, {["Content-Type"] = "text/html"}
@@ -708,84 +717,33 @@ Parameters are case-sensitive.
 
 --]]
 
-
--- convert HTTP GET or POST content into query parameters
-local function parse_parameters (query)
-  local p = {}
-  for n,v in (query or ''): gmatch "([%w_]+)=([^&]*)" do       -- parameters separated by unescaped "&"
-    if v ~= '' then 
-      local val = p[n] or {}
-      val[#val+1] = url.unescape(v)                  -- now can unescape parameter values
-      p[n] = val
-    end
-  end
-  return p
-end
-
-local function get_parameters (env)
-  
-  local query = env.QUERY_STRING
-  local p,p2
-  
-  p = parse_parameters (query)
-  
-  if env.REQUEST_METHOD == "POST" then 
-    local content = env.input:read ()
- 
-    if env.CONTENT_TYPE: find ("www-form-urlencoded", 1, true) then   -- 2017.02.21, plain text search
-      p2 = parse_parameters (content)
-    
-    elseif env.CONTENT_TYPE == "application/json" then
-      p2 = json.decode (content)
-    end
-    
-  end
-
-  for name,value in pairs (p2 or {}) do
-    p[name] = p[name] or value          -- don't override existing value
-  end
-  
-  for name,value in pairs (p) do
-    if #value == 1 then p[name] = value[1] end    -- convert single instances to scalar values
-  end
-  
-  if type (p.target) ~= "table" then p.target= {p.target} end -- target is ALWAYS an array
-
-  return p
-end
-
 -----------------------------------
 --
 -- global entry point called by WSAPI connector
 --
 
 function run (wsapi_env)
-
-  local function unknown (env)
-    return "Not Implemented: " .. env.SCRIPT_NAME, 501
-  end
-  
   _log = function (...) wsapi_env.error:write(...) end      -- set up the log output, note colon syntax
+  local req = wsapi.request.new (wsapi_env)
+  local p = req.GET
+  local p2 = req.POST
   
-  local p = get_parameters (wsapi_env)
+  if wsapi_env.CONTENT_TYPE == "application/json" then
+    local content = wsapi_env.input:read ()
+    p2 = json.decode (content)    
+  end
+
+  for name,value in pairs (p2 or {}) do p[name] = p[name] or value end    -- don't override existing value  
+  if type (p.target) ~= "table" then p.target= {p.target} end             -- target is ALWAYS an array
   
   local script = wsapi_env.SCRIPT_NAME
   script = script: match "^(.-)/?$"      -- ignore trailing '/'
   
-  local handler = dispatch[script] or unknown
-  local ok, return_content, status, headers = pcall (handler, wsapi_env, p)  
-  if not ok then
-    status = 500
-    headers = {}
-  end
-  
-  local function iterator ()     -- one-shot iterator, returns content, then nil
-    local x = return_content
-    return_content = nil 
-    return x
-  end
+  local handler = dispatch[script] or function () return "Not Implemented: " .. script, 501 end
 
-  return status or 500, headers or {}, iterator
+  local _, response, status, headers = pcall (handler, wsapi_env, p)  
+  
+  return status or 500, headers or {}, function () local x = response; response = nil; return x end
 end
 
 

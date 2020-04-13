@@ -1,4 +1,4 @@
-local VERSION = "2019.06.04"
+local VERSION = "2019.08.01"
 
 -- mimetypes
 -- 2016/04/14
@@ -26,6 +26,7 @@ local VERSION = "2019.06.04"
  
 -- 2019.04.08  added image/svg+xml to mimetypes
 -- 2019.04.18  remove historian in-memory cache rules (now implemented in devices module)
+-- 2019.06.11  cache control definitions moved here from servlet module
 
 
 -- http://forums.coronalabs.com/topic/21105-found-undocumented-way-to-get-your-devices-ip-address-from-lua-socket/
@@ -144,9 +145,9 @@ local cgi_prefix = {
     "cgi-bin",      -- ditto
     
     "console",      -- openLuup console interface
-    "openUI",       -- console alias
+    "openLuup",     -- console alias
     
-    "dashboard",    -- for graphite_api (requires DataYours plugin)
+    "dashboard",    -- for graphite_api
     "metrics",      -- ditto
     "render",       -- ditto
     
@@ -163,7 +164,7 @@ local cgi_alias = setmetatable ({
     ["cgi-bin/cmh/backup.sh"]     = "openLuup/backup.lua",
     ["cgi-bin/cmh/sysinfo.sh"]    = "openLuup/sysinfo.lua",
     ["console"]                   = "openLuup/console.lua",
-    ["openUI"]                    = "cgi/openUI.lua",
+    ["openLuup"]                  = "openLuup/console.lua",
     
     -- graphite_api support
     ["metrics"]             = graphite_cgi,
@@ -189,7 +190,16 @@ local dir_alias = {
     ["cmh/skins/default/icons/"] = "icons/",                      -- redirect UI5 icon requests
     ["cmh/skins/default/img/icons/"] = "icons/" ,                 -- 2017.11.14 
   }
-  
+ 
+-- cache retentions (used by file servlet)
+local cache_control = {                 -- 2019.05.14  max-age in seconds indexed by filetype
+  png = 3600, 
+  svg = 3600, 
+  css = 3600, 
+  ico = 3600, 
+  xml = 3600,
+}
+
 -- Data Historian Disk Archive rules
 --
 -- pattern: matches deviceNo.shortServiceId.variable
@@ -245,8 +255,8 @@ return {
     mimetypes       = mimetypes,
     smtp_codes      = smtp_codes,         -- SMTP
     status_codes    = status_codes,       -- HTTP
+    cache_control   = cache_control,      -- for file servlet
     archive_rules   = archive_rules,      -- for historian
-    cache_rules     = cache_rules,        -- ditto
   }
   
 -----

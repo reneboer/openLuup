@@ -1,13 +1,13 @@
 local ABOUT = {
   NAME          = "openLuup.chdev",
-  VERSION       = "2019.06.06",
+  VERSION       = "2020.03.07",
   DESCRIPTION   = "device creation and luup.chdev submodule",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -57,6 +57,16 @@ local ABOUT = {
 -- 2019.05.04  add status_message field to device and status_set/get()
 -- 2019.06.02  chdev.create() sets device category from device type, if necessary (thanks @reneboer)
 --             ALSO, allow missing serviceId in variable definitions to set attribute (thanks @rigpapa)
+-- 2019.06.19  add dev:get_icon() to return dynamic icon name (for console)
+-- 2019.08.29  check non-empty device name in create(), thanks @cokeman
+-- 2019.09.14  set specified attributes to AFTER the default settings - thanks @reneboer
+-- 2019.10.28  do not run startup code for devices whose parent handles them
+-- 2019.12.19  fix get_icons() - state_icon entries may incllude list of the icon names, so ignore non-table items
+
+-- 2020.02.05  add dev:rename()
+-- 2020.02.09  add newindex() to keep integrity of visible luup.device[] structure
+-- 2020.02.12  add Bridge utilities (mapped to luup.openLuup.bridge.*)
+-- 2020.03.07  add ZWay bridge to device startup priorities
 
 
 local logs      = require "openLuup.logs"
@@ -69,7 +79,13 @@ local json      = require "openLuup.json"               -- for device.__tostring
 --  local _log() and _debug()
 local _log, _debug = logs.register (ABOUT)
 
+local BLOCKSIZE = 10000     -- size of device number blocks allocate to openLuup Bridge devices
+
 -- utilities
+
+local function newindex (self, ...) rawset (getmetatable(self).__index, ...) end      -- put non-visible variables into meta
+
+local function jsonify (self) return (json.encode (self: state_table())) or '?' end   -- return JSON device representation
 
 -- generate a (fairly) unique UDN
 -- see: https://en.wikipedia.org/wiki/Universally_unique_identifier
@@ -102,6 +118,7 @@ local function varlist_to_table (statevariables)
   return vars
 end
 
+  
 -- 
 -- function: create (x)
 -- parameters: see below
@@ -112,17 +129,17 @@ end
 local function create (x)
   -- {devNo, device_type, internal_id, description, upnp_file, upnp_impl, 
   -- ip, mac, hidden, invisible, parent, room, pluginnum, statevariables, ...}
-  
+
   _debug (x.description)
   local dev = devutil.new (x.devNo)   -- create the proto-device
   local services = dev.services
   
-  local X                             -- 2018.06.11  don't use impl_file if parent handles actions
   local parent = tonumber (x.parent) or 0
   local parent_device = luup.devices[parent] or {}
-  if parent_device.handle_children then X = 'X' end         -- use dummy device implementation file
+  local do_not_implement = parent_device.handle_children     -- ignore device implementation file if parent handles it
 
-  local d, err = loader.assemble_device (x.devNo, x.device_type, x.upnp_file, X or x.upnp_impl, x.json_file)
+  local d, err = loader.assemble_device (x.devNo, x.device_type, x.upnp_file, x.upnp_impl, x.json_file,
+                                              do_not_implement)
 
   d = d or {}
   local fmt = "[%d] %s / %s / %s   (%s)"
@@ -157,32 +174,30 @@ local function create (x)
       end
     end
   end
-
-  -- go through the variables and set them
-  -- 2016.04.15 note statevariables are now a Lua array of {service="...", variable="...", value="..."}
-  if type(x.statevariables) == "table" then
-    for _,v in ipairs(x.statevariables) do
-      if v.service then                                   -- 2019.06.02
-        dev:variable_set (v.service, v.variable, v.value)
-      else
-        dev:attr_set (v.variable, v.value)
-      end
-    end
-  end
-
+  
+  local device_type = d.device_type or ''
+  local job_priority = {
+    openLuup = 1, 
+    ["urn:schemas-upnp-org:device:altui:1"] = 3, 
+    VeraBridge = 5,
+    ZWay = 5}         -- 2020.03.07
+  local cat_num = tonumber (x.category_num or d.category_num or loader.cat_by_dev[device_type])   -- 2019.06.02
+  local priority = job_priority[device_type]
+  
   -- schedule device startup code
-  local device_name = x.description or d.friendly_name or ('_' .. (x.device_type:match "(%w+):%d+$" or'?'))
+  local function non_empty(x) return x and x:match "%S" and x end
+  local device_name = non_empty (x.description) 
+                        or d.friendly_name or "Device_" .. x.devNo  -- 2019.08.29 check non-empty name
   if d.entry_point then 
     if tonumber (x.disabled) ~= 1 then
-      scheduler.device_start (d.entry_point, x.devNo, device_name)         -- schedule startup in device context
+      if not parent_device.handle_children then                                 -- 2019.10.28  
+        scheduler.device_start (d.entry_point, x.devNo, device_name, priority)  -- schedule startup in device context
+      end
     else
       local fmt = "[%d] is DISABLED"
       _log (fmt: format (x.devNo), "luup.create_device")
     end
   end
-  
-  local device_type = d.device_type or ''
-  local cat_num = tonumber (x.category_num or d.category_num or loader.cat_by_dev[device_type])   -- 2019.06.02
   
   -- set known attributes
   dev:attr_set {
@@ -209,7 +224,20 @@ local function create (x)
     ip              = x.ip or '',
     mac             = x.mac or '',
   }
-  
+
+  -- 2019.09.14 move to here from earlier in the code to avoid overwriting by defaults - thanks @reneboer
+  -- go through the variables and set them
+  -- 2016.04.15 note statevariables are now a Lua array of {service="...", variable="...", value="..."}
+  if type(x.statevariables) == "table" then
+    for _,v in ipairs(x.statevariables) do
+      if v.service then                                   -- 2019.06.02
+        dev:variable_set (v.service, v.variable, v.value)
+      else
+        dev:attr_set (v.variable, v.value)
+      end
+    end
+  end
+
   local a = dev.attributes
 -- TODO: consider protecting device attributes...
 --  setmetatable (dev.attributes, {__newindex = 
@@ -219,7 +247,7 @@ local function create (x)
   local luup_device =     -- this is the information that appears in the luup.devices table
     {
       category_num        = a.category_num,
-      description         = a.name,
+      description         = a.name or '???',
       device_num_parent   = a.id_parent,
       device_type         = a.device_type, 
       embedded            = false,                  -- if embedded, it doesn't have its own room
@@ -233,8 +261,6 @@ local function create (x)
       subcategory_num     = a.subcategory_num,
       udn                 = a.local_udn,
       user                = a.username or '',  
-      
-      bookmark            = 0,                      -- openLuup private value
     }
   
   -- fill out extra data in the proto-device
@@ -300,11 +326,110 @@ local function create (x)
     return states
   end
 
+  -- get list of child device numbers (not grand-children, etc...)
+  function dev:get_children ()
+    local children = {}
+    local id = self.attributes.id
+    for n,d in pairs (luup.devices) do
+      if d.device_num_parent == id then
+        children[#children + 1] = n
+      end
+    end
+    return children
+  end
+  
+  -----------------------------
+  -- dynamic icons
+  
+  local op = {}
+  op.noop  = function () end
+  op["=="] = function (a,b) return a == b end
+  op["!="] = function (a,b) return a ~= b end
+  op["<="] = function (a,b) return a <= b end
+  op[">="] = function (a,b) return a >= b end
+  op["<"]  = function (a,b) return a <  b end
+  op[">"]  = function (a,b) return a >  b end
+
+  local function is_true (d, c)
+    local srv = d.services[c.service]
+    if not srv then return end
+    local var = srv.variables[c.variable]
+    if not var then return end
+    local val = type(c.value) == "number" and tonumber (var.value) or var.value
+    local fct = op[c.operator] or function() end
+    return fct (val, c.value)
+  end
+
+  function dev: get_icon ()
+    local icon = "zwave_default.png"
+    local json_file = self.attributes.device_json
+    local sd = loader.static_data[json_file]
+    if not sd then return icon end        -- can't find static data
+
+    icon = sd.default_icon or icon
+    local si = sd.state_icons
+    if not si then return icon end        -- use default device icon
+
+    local cn, scn = self.category_num, self.subcategory_num
+    for _, set in ipairs (si) do
+      -- 2019.12.19 note that initial entries may include list of the icon names, so ignore non-table items
+      -- each set is {conditions = {}...}, img = '...'} and all need to be met
+      if type(set) == "table" then
+        local met = true
+        for _, c in ipairs (set.conditions or {}) do
+          local cat = (not c.category_num or c.category_num == cn) and
+                      (not c.subcategory_num or c.subcategory_num == scn) 
+          met = met and cat and is_true (self, c)
+        end
+        if met then
+          icon = set.img or icon
+          break
+        end
+      end
+    end
+    return icon
+  end
+
+  -- rename and/or change room , 2020.02.05
+  -- (can be room number or existing room name, see: http://wiki.micasaverde.com/index.php/Luup_Requests#device)
+  function dev: rename (name, new_room)
+    if name then
+      self.description = name       -- change in both places!!
+      self.attributes.name = name
+    end
+    if new_room then
+      local idx = {}
+      for i,room in pairs(luup.rooms) do idx[room] = i end        -- build index of room names
+      self.room_num = tonumber(new_room) or idx[new_room] or 0    -- room number also appears in two places
+      self.attributes.room = tostring(self.room_num)
+    end
+--    devutil.new_userdata_dataversion ()
+    dev: touch()                    -- 2020.02.23
+  end
+
+  -- set parent of device
+  function dev:set_parent (newParent)
+    self.device_num_parent = newParent        -- parent resides in two places under different names !!
+    self.attributes.id_parent = newParent
+  end
+  
+  
   return setmetatable (luup_device, {
       __index = dev, 
-      __tostring = function (self) return (json.encode (self: state_table())) or '?' end,
-      --TODO:    __metatable = "access denied",
-    } )
+      __newindex = newindex,          -- 2020.02.09
+      __tostring = jsonify})
+  
+end
+
+-- generate the next device number
+local function next_device_number ()
+  local devNo = tonumber (luup.attr_get "Device_Num_Next")
+  if devNo < BLOCKSIZE then                             -- 2020.02.15
+    luup.attr_set ("Device_Num_Next", devNo + 1)        -- increment as usual
+  else
+    devNo = #luup.devices + 1   -- else start reusing (very) old free device numbers
+  end
+  return devNo
 end
 
 -- this create device function has the same parameter list as the luup.create_device call
@@ -318,8 +443,7 @@ local function create_device (
       ip, mac, hidden, invisible, parent, room, pluginnum, statevariables,
       pnpid, nochildsync, aeskey, reload, nodupid  
   )
-  local devNo = tonumber (luup.attr_get "Device_Num_Next")
-  luup.attr_set ("Device_Num_Next", devNo + 1)
+  local devNo = next_device_number ()
   local dev = create {
     devNo = devNo,                      -- (number)   (req)  *** NB: extra parameter cf. luup.create ***
     device_type = device_type,          -- (string)
@@ -445,7 +569,99 @@ local function sync (device, ptr, no_reload)
   return ptr.reload
 end
 
+
+----------------------------------------
 --
+-- 2020.02.12
+-- Bridge/Child utilities (mapped to luup.openLuup.bridge.*)
+--
+
+local SID = "urn:akbooer-com:serviceId:openLuupBridge1"
+
+local bridge_utilities = {BLOCKSIZE = BLOCKSIZE, SID = SID}
+
+-- establish next base device number for child devices
+function bridge_utilities.nextIdBlock ()
+  -- 2020.02.12 simply calculate the next higher free block
+  local maxId = 0
+  for i in pairs (luup.devices) do maxId = (i > maxId) and i or maxId end     -- max device id
+  local maxBlock = math.floor (maxId / BLOCKSIZE)                             -- max block
+  return (maxBlock + 1) * BLOCKSIZE                                           -- new block offset
+end
+
+-- get next available device number in block
+function bridge_utilities.nextIdInBlock (offset, baseline)
+  local bridgeNo = math.floor (offset / BLOCKSIZE)
+  local maxId = offset + (baseline or 1000)  -- Ids below baseline reserved for whatever you like
+  for n in pairs(luup.devices) do
+    if math.floor (n / BLOCKSIZE) == bridgeNo then
+      maxId = math.max (maxId, n)
+    end
+  end
+  return maxId + 1
+end
+
+-- get vital information from installed openLuup Bridge devices
+-- indexed by (integer) bridge#, and  .by_pk[], .by_name[]
+-- 2020.02.12 recognise bridge by having high-numbered children, not by device type
+function bridge_utilities.get_info ()
+  local bridge = {[0] = {nodeName = "openLuup", PK = '0', offset = 0, devNo = 2}}   -- preload openLuup info
+  -- which devices are bridges?
+  for i,dev in pairs(luup.devices) do
+    local p = dev.device_num_parent
+    if  i > BLOCKSIZE       -- high-numbered device
+    and p < BLOCKSIZE       -- low-numbered parent (ie. local device) 
+    and p > 1               -- ignore the mapped Zwave controller #1
+    and not bridge[p] then  -- not already recorded
+      
+      local bridgeNo = math.floor (i / BLOCKSIZE)
+      local d = luup.devices[p]
+      local name = d.description: gsub ("%W",'')      -- remove non-alphanumerics
+      local PK = luup.variable_get (bridge_utilities.SID, "Remote_ID", p) -- generic Remote ID
+      local offset = bridgeNo * BLOCKSIZE
+      if offset and PK then
+        local index = math.floor (offset / BLOCKSIZE)   -- should be a round number anyway
+        bridge[index] = {nodeName = name, PK = PK, offset = offset, devNo = p}
+      end
+    end
+  end
+  
+  local by_pk, by_name, by_devNo = {}, {}, {}  -- indexes
+  for _,b in pairs (bridge) do    
+    by_pk[b.PK] = b
+    by_name[b.nodeName] = b
+    by_devNo[b.devNo] = b
+  end
+  
+  bridge.by_pk = by_pk          -- add indexes to bridge table
+  bridge.by_name = by_name
+  bridge.by_devNo = by_devNo
+  return bridge
+end
+
+-- make a list of parent's existing children, counting grand-children, etc.!!!
+function bridge_utilities.all_descendants (parent)
+  
+  local idx = {}
+  for child, dev in pairs (luup.devices) do   -- index all devices by parent id
+    local num = dev.device_num_parent
+    local children = idx[num] or {}
+    children[#children+1] = child
+    idx[num] = children
+  end
+
+  local c = {}
+  local function children_of (d)      -- recursively find all children
+    for _, child in ipairs (idx[d] or {}) do
+      c[child] = luup.devices[child]
+      children_of (child)
+    end
+  end
+  children_of (parent)
+  return c
+end
+
+
 ----------------------------------------
 
 
@@ -456,6 +672,9 @@ return {
   
   create = create,
   create_device = create_device,
+  
+  -- openLuup Bridge utilities for child numbering
+  bridge = bridge_utilities,
   
   -- this is the actual child device module for luup
   chdev = {

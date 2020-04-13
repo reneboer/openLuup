@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "openLuup.loader",
-  VERSION       = "2019.06.02",
+  VERSION       = "2019.11.07",
   DESCRIPTION   = "Loader for Device, Service, Implementation, and JSON files",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2019 AKBooer",
@@ -59,9 +59,12 @@ local ABOUT = {
 
 -- 2019.04.12  change cached_read() to use virtualfilesystem explicitly (to register cache hits)
 -- 2019.04.14  do not cache service or implementation .xml files 
--- 2019.05.23  replace device.json-supplied file eventList2 with our own device status events
 -- 2019.05.29  find_file() also looks in built-in/ for 'last chance' files
 -- 2019.06.02  export cat_by_dev table for chdev to set device category (thanks @reneboer)
+-- 2019.06.12  move compile_and_run here from loader (to be used also by console)
+-- 2019.06.16  add loader.dir() to walk search path
+-- 2019.07.14  use new XML Document methods
+-- 2019.11.07  add do_not_implement parameter to assemble_device_from_files() for child devices
 
 
 ------------------
@@ -104,11 +107,11 @@ local shared_environment  = new_environment "openLuup_startup_and_scenes"
 
 ------------------
 
+local lfs = require "lfs"
 local json = require "openLuup.json"
 local vfs  = require "openLuup.virtualfilesystem"
 local scheduler = require "openLuup.scheduler"  -- for context_switch()
 local xml = require "openLuup.xml"
-
 
 local service_data = {}         -- cache for serviceType and serviceId data, indexed by both
 
@@ -175,6 +178,142 @@ end
 
 --  utilities
 
+-- 2019.06.11 add pretty() to shared environment:
+
+
+-- pretty (), 
+-- pretty-print for Lua
+-- 2014.06.26   @akbooer
+-- 2015.11.29   use names for global variables (ie. don't expand _G or system libraries)
+--              use fully qualified path names for circular references
+--              improve formatting of isolated nils in otherwise contiguous numeric arrays
+--              improve formatting of nested tables
+-- 2016.01.09   fix for {a = false}
+-- 2016.02.26   use rawget to investigate array numeric indices, preload enc[_G] = _G only
+-- 2016.03.10   fix for {nil,nil, 3,nil,5}
+-- 2019.06.25   fix for out of order discontiguous numeric indices {nil,nil,3, [42]=42, nil,nil,nil,7,8,9}
+
+----------------------------
+
+
+function shared_environment.pretty (Lua)        -- 2014 - 2019.06.25   @akbooer
+  local L, N_NILS = {}, 2                       -- number of allowed nils between contiguous numeric indices
+  local tab, enc = '  ', {[_G] = "_G"}          -- don't expand global environment
+  local function p(...) for _, x in ipairs {...} do if x~='' then L[#L+1] = x end; end; end
+  local function ctrl(y) return ("\\%03d"): format (y:byte ()) end          -- deal with escapes, etc.
+  local function quote(x) return x:match '"' and "'" or '"' end             -- pick appropriate quotation mark
+  local function str_obj(x) local q = quote(x); return table.concat {q, x:gsub ("[\001-\031]", ctrl), q} end
+  local function brk_idx(x) return '[' .. tostring(x) .. ']' end
+  local function str_idx(x) return x:match "^[%a_][%w_]*$" or brk_idx(str_obj (x)) end
+  local function val (x, depth, name) 
+    if name == "_G" or enc[x] then p(enc[x] or "_G") return end             -- previously encoded
+    local t = type(x)
+    if t == "string" then p(str_obj (x))  return end
+    if t ~= "table"  then p(tostring (x)) return end
+    if not next(x) then p "{}" return end
+    local id_num, id_str = {}, {}
+    for i in pairs(x) do 
+      if type(i) == "number" then id_num[#id_num+1]=i else id_str[#id_str+1]= i end 
+    end
+    
+    enc[x] = name; depth = depth + 1; p '{'                                 -- start encoding this table
+    local nl1, nl2 = '\n'..tab:rep (depth), '\n'..tab:rep (depth-1) 
+    
+    table.sort (id_num)
+    local i, num_lines, nl_num = 1, 0, ''
+    for _,j in ipairs (id_num) do                                            -- numeric indices
+      if (j > 0) and (i + N_NILS >= j) then                                  -- contiguous indices
+        p(nl_num); nl_num=''
+        for _ = i, j - 1 do p "nil," end
+        val (x[j], depth, name..brk_idx (j)) ; p ','
+        i = j + 1
+      else                                                                  -- discontiguous indices
+        nl_num = nl1
+        num_lines = num_lines + 1
+        local fmt_idx = brk_idx (j)
+        p (nl_num, fmt_idx, " = "); val (x[j], depth, name..fmt_idx); p (',')
+      end
+    end
+
+    table.sort (id_str, function(a,b) return tostring(a) < tostring(b) end)
+    local nl_str = (#id_str > 1 or #id_num > 0) and nl1 or ''
+    for _,j in ipairs (id_str) do                                           -- non-numeric indices
+      local fmt_idx = str_idx(tostring(j))
+      p (nl_str, fmt_idx, " = "); val (x[j], depth, name..'.'..fmt_idx); p (',')
+    end
+    L[#L] = nil                                                             -- stomp over final comma
+    if num_lines + #id_str > 1 then p(nl2) end                              -- indent file brace, if necessary
+    enc[x] = nil; p '}'                                                     -- finish encoding this table
+  end
+  val(Lua, 0, '_') 
+  return table.concat(L) 
+end 
+
+ 
+function shared_environment.pretty_old (Lua)    -- 2014 - 2016.03.10   @akbooer
+  local con, tab, enc = table.concat, '  ', {[_G] = "_G"}                -- don't expand global environment
+  local function ctrl(y) return ("\\%03d"): format (y:byte ()) end       -- deal with escapes, etc.
+  local function str_obj(x) return '"' .. x:gsub ("[\001-\031]", ctrl) .. '"' end
+  local function brk_idx(x) return '[' .. tostring(x) .. ']' end
+  local function str_idx(x) return x:match "^[%a_][%w_]*$" or brk_idx(str_obj (x)) end
+  local function nl (d,x) if x then return '\n'..tab:rep (d),'\n'..tab:rep (d-1) else return '','' end end
+  local function val (x, depth, name) 
+    if enc[x] then return enc[x] end                                    -- previously encoded
+    local t = type(x)
+    if t ~= "table" then return (({string = str_obj})[t] or tostring) (x) end
+    enc[x] = name                                                       -- start encoding this table
+    local idx, its, y = {}, {}, {rawget (x,1) or rawget (x,2) and true}
+    for i in pairs(x) do                                                -- fix isolated nil numeric indices
+      y[i] = true; if (type(i) == "number") and rawget(x,i+2) then y[i+1] = true end
+    end
+    for i in ipairs(y) do                                               -- contiguous numeric indices
+      y[i] = nil; its[i] = val (rawget(x,i), depth+1, con {name,'[',i,']'}) 
+    end
+    if #its > 0 then its = {con (its, ',')} end                         -- collapse to single line
+    for i in pairs(y) do 
+      if (rawget(x,i) ~= nil) then idx[#idx+1] = i end                  -- list and sort remaining non-nil indices
+    end
+    table.sort (idx, function (a,b) return tostring(a) < tostring(b) end)
+    for _,j in ipairs (idx) do                                          -- remaining indices
+      local fmt_idx = (({string = str_idx})[type(j)] or brk_idx) (j)
+      its[#its+1] = fmt_idx .." = ".. val (x[j], depth+1, name..'.'..fmt_idx) 
+    end
+    enc[x] = nil                                                        -- finish encoding this table
+    local nl1, nl2 = nl(depth, #idx > 1)                                -- indent multiline tables 
+    return con {'{', nl1, con {con (its, ','..nl1) }, nl2, '}'}         -- put it all together
+  end
+  return val(Lua, 1, '_') 
+end 
+
+
+-- 2019.06.16  dir() walks search path, with optional filename pattern
+local paths = {"openLuup/", "./", "../cmh-lu/" , "files/", "www/"}
+
+local function dir (pattern)
+  local fname = {}
+  for _, path in ipairs(paths) do
+    if lfs.attributes (path) then     -- lfs.dir() throws an error if path doesn't exist
+      for file in lfs.dir (path) do
+        if not pattern or file: match (pattern) then
+          fname[file] = true    -- overwrite duplicates
+        end
+      end
+    end
+  end
+  for filepath in vfs.dir() do
+    local file = filepath: match "[^/]+$"       -- remove any leading directory tree
+    if not pattern or file: match (pattern) then
+      fname[file] = true    -- overwrite duplicates
+    end
+  end
+  local files = {}
+  for f in pairs (fname) do
+      files[#files+1] = f
+  end
+  table.sort (files)
+  local j = 0
+  return function () j = j+1; return files[j] end
+end
 
 -- 2018.11.21  return search path and file descriptor
 local function open_file (filename)
@@ -243,25 +382,27 @@ end
 -- DEVICES
 
 -- parse device file, or empty table if error
-local function parse_device_xml (device_xml)
+local function parse_device_xml (xmlDoc)
   
-  local root = xml.documentElement (device_xml, "root") -- , "urn:schemas-upnp-org:device-1-0")
-  local device = root: xpath "//device" [1]
+  local root = xmlDoc.documentElement
+  if root.nodeName ~= "root" then error ("Device XML root element name is not 'root'") end
+  -- should also check root.xmlns == "urn:schemas-upnp-org:device-1-0"
+  
+  local device = xmlDoc.xpath (root, "//device") [1]
   if not device then error ("device file syntax error", 1) end
     
   local d = {}
---  for x in device:xpathIterator "//*/text()" do  -- same as ipairs below
   for _,x in ipairs (device.childNodes) do
-    d[x.nodeName:lower()] = x.nodeValue            -- force lower case versions
+    d[x.nodeName:lower()] = x.textContent            -- force lower case versions
   end
   
-  local impl = device: xpath "//implementationList/implementationFile" [1]
-  local impl_file = (impl or {}).nodeValue
+  local impl = xmlDoc.xpath (device, "//implementationList/implementationFile") [1]
+  local impl_file = (impl or {}).textContent
   
   local service_list = {}
-  for svc in device: xpathIterator "//serviceList/service" do
+  for svc in xmlDoc.xpathIterator (device, "//serviceList/service") do
     local service = {}
-    for _,x in ipairs (svc.childNodes) do service[x.nodeName] = x.nodeValue end
+    for _,x in ipairs (svc.childNodes) do service[x.nodeName] = x.textContent end
     service_list[#service_list+1] = service
   end
   
@@ -328,32 +469,35 @@ end
 
 
 -- read implementation file, if present, and build actions, files, and code.
-local function parse_impl_xml (impl_xml, raw_xml)
+local function parse_impl_xml (xmlDoc, raw_xml)
   
-  local implementation = xml.documentElement (impl_xml, "implementation") -- apparently, no namespace
+  local implementation = xmlDoc.documentElement
+  if implementation.nodeName ~= "implementation" then 
+    error ("Implementation XML root element name is not 'implementation'") end
+  -- apparently, no namespace to check!
   
   local i = {}
   -- get the basic text elements
   for _, x in ipairs (implementation.childNodes) do
-    local name, value = x.nodeName, x.nodeValue
-    i[name:lower()] = value      -- force lower case version, value may be nil
+    local name, value = x.nodeName, x.textContent
+    i[name:lower()] = value      -- force lower case version, --TODO: value may be nil?? NOT with textContent
   end
   
   -- build general <incoming> tag (not job specific ones)
-  local incoming_lua = implementation: xpath "//incoming/lua" [1]
-  local lua = (incoming_lua or {}).nodeValue
+  local incoming_lua = xmlDoc.xpath (implementation, "//incoming/lua") [1]
+  local lua = (incoming_lua or {}).textContent
   local incoming = build_incoming (lua)
   
-  
-  local settings_protocol = implementation: xpath "//settings/protocol" [1]
-  local protocol = (settings_protocol or {}).nodeValue
+
+  local settings_protocol = xmlDoc.xpath (implementation, "//settings/protocol") [1]
+  local protocol = (settings_protocol or {}).textContent
   
   -- build actions into an array called "_openLuup_ACTIONS_" 
   -- which will be subsequently compiled and linked into the device's services
   local action_list = {}
-  for act in implementation: xpathIterator "//actionList/action" do
+  for act in xmlDoc.xpathIterator (implementation, "//actionList/action") do
     local action = {}
-    for _,x in ipairs (act.childNodes) do action[x.nodeName] = x.nodeValue end
+    for _,x in ipairs (act.childNodes) do action[x.nodeName] = x.textContent end
     action_list[#action_list+1] = action
   end
   local actions = build_action_tags (action_list)
@@ -414,15 +558,18 @@ end
 -- SERVICES
 
 -- parse service files
-local function parse_service_xml (service_xml)
+local function parse_service_xml (xmlDoc)
   
-  local scpd = xml.documentElement (service_xml, "scpd") -- , "urn:schemas-upnp-org:service-1-0")
+  local scpd = xmlDoc.documentElement
+  if scpd.nodeName ~= "scpd" then 
+    error ("Service XML root element name is not 'scpd'") end
+  -- should also check scpd.xmlns == "urn:schemas-upnp-org:device-1-0"
   
   local variables = {}
   local short_codes = {}          -- lookup table of short_codes (for use by sdata request)
-  for var in scpd: xpathIterator "//serviceStateTable/stateVariable" do
+  for var in xmlDoc.xpathIterator (scpd, "//serviceStateTable/stateVariable") do
     local variable = {}
-    for _,x in ipairs (var.childNodes) do variable[x.nodeName] = x.nodeValue end
+    for _,x in ipairs (var.childNodes) do variable[x.nodeName] = x.textContent end
     if variable.name then
       variables[#variables+1] = variable
       short_codes[variable.name] = variable.shortCode
@@ -432,14 +579,14 @@ local function parse_service_xml (service_xml)
   -- all the service actions
   local actions = {}
   
-  for act in scpd: xpathIterator "//actionList/action" do
+  for act in xmlDoc.xpathIterator (scpd, "//actionList/action") do
     local action = {}
-    for _,x in ipairs (act.childNodes) do action[x.nodeName] = x.nodeValue end
+    for _,x in ipairs (act.childNodes) do action[x.nodeName] = x.textContent end
     if action.name then
       local argumentList = {}      
-      for arg in act: xpathIterator "//argumentList/argument" do
+      for arg in xmlDoc.xpathIterator (act, "//argumentList/argument") do
         local a = {}
-        for _,x in ipairs (arg.childNodes) do a[x.nodeName] = x.nodeValue end
+        for _,x in ipairs (arg.childNodes) do a[x.nodeName] = x.textContent end
         if a.name then
           argumentList[#argumentList+1] = a
         end
@@ -517,12 +664,26 @@ local function compile_lua (source_code, name, old)
   return env, error_msg
 end
 
+-- what it says...
+local function compile_and_run (lua, name, print_function)
+  print_function = print_function or function () end      -- print function for the compiled code to use
+  local startup_env = shared_environment    -- shared with scenes
+  local source = table.concat {"function ", name, " (print) ", lua, '\n', "end" }
+  local ok, code, err 
+  code, err = compile_lua (source, name, startup_env) -- load, compile, instantiate
+  if code then 
+    ok, err = scheduler.context_switch (nil, code[name], print_function)  -- no device context
+    code[name] = nil      -- remove it from the name space
+  end
+  return ok, err
+end
+
 
 -- the definition of a device with UPnP xml files is a complete mess.  
 -- The functional definition is sprayed over a variety of files with various inter-dependencies.
 -- This function attempts to wrap the assembly into one place.
 -- defined filename parameters override the definitions embedded in other files.
-local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_impl, json_file)
+local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_impl, json_file, do_not_implement)
 
   -- returns non-blank contents of x or nil
   local function non_blank (x) 
@@ -538,7 +699,6 @@ local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_i
   end
   d.device_type = non_blank (d.device_type) or device_type      --  file overrides parameter
   -- read service files, if referenced, and save service_data
-  local device_states = {}
   if d.service_list then
     for _,x in ipairs (d.service_list) do
       local stype = x.serviceType 
@@ -550,11 +710,6 @@ local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_i
         local sid = x.serviceId
         if sid then
           service_data[sid] = service_data[stype]             -- point the serviceId to the same
-        end
-        -- short_codes[var_name] = short_name
-        -- 2019.05.24  construct device states from short codes (for new eventList2)
-        for var_name, short_name in pairs (service_data[sid].short_codes or {}) do
-          device_states[short_name] = {srv = sid, name = var_name}
         end
       end
     end
@@ -568,17 +723,6 @@ local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_i
     if json then
       json.device_json = file       -- insert possibly missing info (for ALTUI icons - thanks @amg0!)
     end
-    -- 2019.05.23 remove device-supplied eventlist2 and replace with our own
-    --     {id=3, serviceId = "openLuup", argumentList = {}, label = Label ("openLuup", "CPU : (openLuup)") },
-    -- Label {lang_tag = tag, text = tostring(text)}    -- tostring() forces serliaization of html5 elements
-    local ev2 = {}
-    local info = "%s / %s : (%s)"
-    for state, var in pairs (device_states) do
-      local i = #ev2+1
-      ev2[i] = {id=i, serviceId = var.srv, label = {lang_tag = "openLuup", text = info:format (state, var.name, var.srv)}}
-    end
-    json.eventList2 = ev2
-    ----
     static_data [file] = json  
   end
 
@@ -594,7 +738,7 @@ local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_i
 
   -- load and compile the amalgamated code from <files>, <functions>, <actions>, and <startup> tags
   local code, error_msg
-  if i.source_code then
+  if i.source_code and not do_not_implement then
     
   -----
   --
@@ -660,10 +804,10 @@ local function assemble_device_from_files (devNo, device_type, upnp_file, upnp_i
 end
 
 
+------
+
 return {
   ABOUT = ABOUT,
-
-  TEST = {},
   
   -- tables
   cat_by_dev          = cat_by_dev,         -- 2019.06.02
@@ -674,6 +818,8 @@ return {
   -- methods
   assemble_device     = assemble_device_from_files,
   compile_lua         = compile_lua,
+  compile_and_run     = compile_and_run,
+  dir                 = dir,              -- walk the search path
   find_file           = find_file,
   new_environment     = new_environment,
   parse_service_xml   = parse_service_xml,

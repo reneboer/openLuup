@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "openLuup.devices",
-  VERSION       = "2019.05.15",
+  VERSION       = "2019.12.11",
   DESCRIPTION   = "low-level device/service/variable objects",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2018 AKBooer",
@@ -47,6 +47,10 @@ local ABOUT = {
 -- 2019.04.18  do not create variable history for Zwave serviceId or epoch values
 -- 2019.04.24  changed job.notes to job.type in call_action()
 -- 2019.04.25  add touch() function to make device appear in status request, etc.
+-- 2019.08.12  add delete_single_var() to allow console to surgically remove one variable
+-- 2019.12.10  add sl_ prefix special case for variable history caching
+--             see: https://community.getvera.com/t/reactor-on-altui-openluup-variable-updates-condition/211412/16
+-- 2019.12.11  correct nil parameter handling in variable_watch() - thanks @rigpapa
 
 
 local scheduler = require "openLuup.scheduler"        -- for watch callbacks and actions
@@ -255,7 +259,9 @@ function variable:set (value)
     local v = tonumber(value)                     -- only numeric values
     if v then
       local epoch = v > 1234567890                -- cheap way to identify recent epochs? (and other big numbers!)
-      if value ~= self.value and not epoch then   -- only cache changes
+      if ((value ~= self.value)                   -- only cache changes
+      or  (self.name: sub(1,3) == "sl_"))         -- 2019.12.10 sl_ prefix special case
+      and not epoch then
         local hipoint = (self.hipoint or 0) % (self.hicache or CacheSize) + 1
         local n = hipoint + hipoint
         self.hipoint = hipoint
@@ -342,13 +348,15 @@ local function variable_watch (dev, fct, serviceId, variable, name, silent)
   }
   if dev then
     -- a specfic device
-    local srv = dev.services[serviceId]
-    if srv then
-      local var = srv.variables[variable] 
-      if var then                                 -- set the watch on the variable
-        var.watchers[#var.watchers+1] = callback
-      else                                        -- set the watch on the service
-        srv.watchers[#srv.watchers+1] = callback
+    if serviceId then
+      local srv = dev.services[serviceId]
+      if srv then 
+        if variable then                                 -- set the watch on the variable
+          local var = srv.variables[variable] 
+          if var then var.watchers[#var.watchers+1] = callback end
+        else                                        -- set the watch on the service
+          srv.watchers[#srv.watchers+1] = callback
+        end
       end
     else
       dev.watchers[#dev.watchers+1] = callback     -- set the watch on the device
@@ -395,6 +403,7 @@ local function new (devNo)
   -- function delete_vars
   -- parameter: device 
   -- deletes all variables in all services (but retains actions)
+  -- needed for AltUI modify_user_data() call used to remove a single variable (and replace all the others)
   local function delete_vars (dev)
     local v = dev.variables
     for i in ipairs(v) do v[i] = nil end    -- clear each element, don't replace whole table
@@ -407,6 +416,21 @@ local function new (devNo)
     end
     
     new_userdata_dataversion ()
+  end
+  
+  -- function delete_var
+  -- removes a single var
+  -- this is harder than it seems, 
+  -- it's indexed in two places, and existing vars have to be renumbered
+  local function delete_single_var (dev, id)
+    -- IDs start at zero
+    local v = dev.variables
+    local var = v[id+1]                         -- this is the one to go
+    local svc = dev.services[var.srv]           -- this is its service
+    table.remove (v, id+1)                      -- remove from device variables array 
+    for i, x in ipairs (v) do x.id = i-1 end    -- renumber the whole array
+    svc[var.name] = nil                         -- remove from service variables
+    dev: touch()                                -- say we changed something
   end
   
   -- function: variable_set
@@ -560,8 +584,9 @@ local function new (devNo)
       variable_get        = variable_get,
       version_get         = function () return version end,
       
-      delete_vars         = delete_vars,    -- 2018.01.31
-      touch               = touch,          -- 2019.04.25
+      delete_single_var   = delete_single_var,  -- 2019.08.12
+      delete_vars         = delete_vars,        -- 2018.01.31
+      touch               = touch,              -- 2019.04.25
     }
     
   return device_list[devNo]

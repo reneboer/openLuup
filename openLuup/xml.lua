@@ -1,12 +1,12 @@
 local ABOUT = {
   NAME          = "openLuup.xml",
-  VERSION       = "2019.04.30",
-  DESCRIPTION   = "XML utilities (HTML5, SVG) and DOM-style parser",
+  VERSION       = "2020.03.20",
+  DESCRIPTION   = "XML utilities (HTML, SVG) and DOM-style parser/serializer",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   LICENSE       = [[
-  Copyright 2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -22,30 +22,30 @@ local ABOUT = {
 ]]
 }
 
-
 ------------------
 --
--- XML module
+-- XML module  XML utilities (HTML, SVG) and DOM-style parser/serializer
 --
--- decode()  a basic XML DOM paser
--- encode()  XML representation of a simple Lua structure... not the inverse of decode()
---
-
 
 -- 2018.05.08  COMPLETE REWRITE - using DOM-style parser
--- 2018.07.07  handle multiple string values in encode(), add compatible simplify()
 
 -- 2019.03.22  add HTML5 and SVG encoding
 -- 2019.04.03  fix svg:rect() coordinate attribute names
 -- 2019.04.06  add any unknown HTML5 tag as a new element
 -- 2019.04.30  add preamble parameter to xml.encode() for encodeDocument()
 
+-- 2019.07.14  ANOTHER SIGNIFICANT REWRITE 
+--                to share serializer, parser, and Node methods between XML, HTML, and SVG
+--                and provide new factory methods for XML, HTML, and SVG documents
+
+-- 2020.03.20  trow() function for generic HTML table rows (allows intervening HTML)
+
 --[[
 
-This is a replacement for an earlier module (~February 2015) which sought to represent XML
+This is an updated replacement for an earlier module (~February 2015) which sought to represent XML
 directly in a simple Lua table structure, suitable for UPnP device/service/implementation files.
 
-With increasing number of bespoke XML files by plugin developers, this showed inadequacies:
+With increasing number of bespoke XML files by plugin developers, the original code showed inadequacies:
 -- 2015.11.03  cope with comments (thanks @vosmont and @a-lurker)
 -- see: http://forum.micasaverde.com/index.php/topic,34572.0.html
 -- 2016.04.14  @explorer expanded tags to alpha-numerics and underscores
@@ -55,25 +55,26 @@ With increasing number of bespoke XML files by plugin developers, this showed in
 
 Many thanks to those who helped to point out (and fix) some of these problems.
 
-However, it's clear that more robustness is needed at this most fundamental level,
+However, it's clear that more robustness was needed at this most fundamental level,
 and the 'todo' comment in the original version was always "proper XML parser rather than nasty hack?"
 ...now finally been addressed with a complete rewrite, offering a DOM-style parser.
 
-Whilst not a fully validating parser, this Domain Object Model (DOM) version 
-attempts to follow much of the spirit of the WWW3 standards: 
+Whilst not a fully validating parser, this Domain Object Model (DOM) version has its own
+Lua-style of DOM, but provides meta variables and methods which attempt to follow much of 
+the spirit of the WWW3 standards: 
  
- https://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html
- https://www.w3.org/TR/DOM-Level-2-Core/core.html
- https://www.w3.org/TR/DOM-Level-2-Traversal-Range/traversal.html
- http://w3schools.sinsixx.com/dom/dom_methods.asp.htm
+  https://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html
+  https://www.w3.org/TR/DOM-Level-2-Core/core.html
+  https://www.w3.org/TR/2004/REC-DOM-Level-3-Core-20040407/
+  https://www.w3.org/TR/DOM-Level-2-Traversal-Range/traversal.html
 
 Features include:
   - ignores processing instructions, comments, and CDATA
   - expands self-closing tags
-  - reads and saves attributes
+  - handles attributes
   - element relationship links:
     - parentNode, firstChild, lastChild,
-    - previousSibling, nextSibling
+    - TODO: previousSibling, nextSibling
   - some navigation routines: 
     - nextNode(), including optional filter function
     - getElementsByTagName() 
@@ -82,106 +83,95 @@ Features include:
     - xpathIterator()
   - .documentElement field of the model accesses the root XML document element
 
-In a break from the WWW3 standard, text is NOT stored in a child text element, 
-but in the .nodeValue attribute of the element itself.  It seemed much easier this way.
+The underlying model is a simple Lua table, with children in succesive elements and attributes as named index entries. Metamethods are provided to simulteNode interface with the following Lua substitutions:
+
+    metamethods     x[-3]     -- specific to individual elements
+    x.ownerDocument x[-2]     -- may be nil
+    x.parentNode    x[-1]     -- may be nil
+    x.nodeName      x[0]      -- this is the only DOM element used in _serialize() / _parse()
+    x.attributes.y  x.y       -- for non-numeric 'y'
+    x.firstChild    x[1]
+    x.lastChild     x[#x]     -- n-th child is x[n]
+
+Note that zero or negative indices do not appear in the Lua ipairs() iterator, or length operator.
+Structure can be navigated with simple Lua table handling.
+
+In a break from the WWW3 standard, a Text Node is simply a string 
+(as the child of an Element Node), not a different type of Node.
+In fact, Element is the only node type with W3 standard-like features (ignoring the document itself.)
 
 --]]
 
-
--- this single metatable is attached to every node element to provide navigation methods
-local meta = {__index = {
-
-    -- nextNode()  in-order search of tree elements, with optional filter
-    -- https://www.w3.org/TR/DOM-Level-2-Traversal-Range/traversal.html#Iterator-overview
-    nextNode = function (self, filter)
-      local function in_order (x, path)
-        path = path .. '/'
-        for _, y in ipairs(x.childNodes or {}) do
-          local path = path .. y.nodeName
-          if not filter or filter(y, path) then coroutine.yield (y) end
-          in_order (y, path)
-        end
-      end
-      -- use coroutines to turn the above recursive function into an iterator
-      local path = '/' .. self.nodeName       -- added for xpath functionality
-      return coroutine.wrap (function () return in_order (self, path) end)
-    end,
-
-    -- getElementsByTagName()  in-order search by name (or wildcard '*') 
-    -- https://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html#ID-BBACDC08
-    getElementsByTagName = function (self, name)
-      local elements = {}
-      local filter = name and name ~= '*' and function (x) return x.nodeName == name end
-      for x in self:nextNode (filter) do elements[#elements+1] = x end
-      return elements
-    end,
-
-    -- xpath() and xpathIterator()
-    -- see: https://www.w3.org/TR/xpath-10/
-    -- see: https://docs.python.org/2/library/xml.etree.elementtree.html#xpath-support
-    -- see: http://code.mios.com/trac/mios_genericutils/wiki/XPath          
-    -- only the abbreviated syntax expressions /a/b/c, //b/c, //b/*, /a/b/text() are implemented
-    xpathIterator = function (self, path)
-      local func                                                -- set 1 if /text() function call present
-      local function fct(f) func = f return '' end
-      local function node (_, p) return p: match (path) end                  -- normal nodes
-      local function text (e, p) return e.nodeValue and p: match (path) end  -- text nodes
-      local filter = {node=node, text=text}
-      
-      path = path: gsub ("^//", '/' .. self.nodeName .. '/')    -- fix the full path name
-      path = path: gsub ("/(%w+)%(%)$", fct)                    -- remove /fct(), but note presence
-      path = path: gsub ('*', "[^/]+")                          -- wildcard works within each level only
-      path = table.concat {'^', path, '$'}                      -- match the WHOLE path
-      
-      return self:nextNode (filter [func] or node)
-    end,
-    
-    -- xpath() uses xpathIterator() to return a list of elements
-    xpath = function (self, path)
-      local elements = {}
-      for x in self:xpathIterator (path) do elements[#elements+1] = x end
-      return elements
-    end,
-
-  }
-}
-
-
-
--- retrieve the root XML document element and optionally check that it matches name and namespace
--- NOTE that documentElement (not this function) is also a hidden field of the entire DOM model
-local function documentElement (xml, name, namespace)
-  
-  local valid = type(xml) == "table" and xml.documentElement
-  if not valid then error ("not an XML DOM", 2) end
-  
-  local root = xml.documentElement
-  if name and root.nodeName ~= name then error ("XML root element name is not: " .. name, 2) end
-      
-  local ns = root.attributes.xmlns or ''
-  if namespace and ns ~= namespace then
-    error (table.concat {"XML file namespace '" , ns, "' does not match: '", namespace, "'"}, 2)
-  end
-
-  return root
-end
-
+-- XML/HTML special character escapes
 
 local escape do
   local fwd = {['<'] = "&lt;", ['>'] = "&gt;", ['"'] = "&quot;", ["'"] = "&apos;", ['&'] = "&amp;"}
-  escape = function (x) return (x: gsub ([=[[<>"'&]]=], fwd)) end
+  escape = function (x) return (x: gsub ('[<>"'.."'&]", fwd)) end
 end
-
 
 local unescape do
   local rev = {lt = '<', gt = '>', quot = '"', apos = "'", amp = '&'}
   unescape = function (x) return (x: gsub ("&(%w+);", rev)) end
 end
 
+-- basic DOM element node
+
+local NodeMeta = {}     -- NB: real metamethods will be added later!
+                        -- parse / serialize do not access any metamethods
+
+local function createElement (name, contents)    -- TODO: flatten tables (DocumentFragments) ?
+  if not contents or type (contents) == "string" then contents = {contents} end
+  local self = setmetatable ({[0] = name}, NodeMeta)
+  for n,v in pairs (contents) do self[n] = v end          -- shallow copy of contents
+  return self
+end
 
 
--- decode()  basic DOM model
-local function decode (xml)
+---------------------------------------------------------------
+--
+-- Core serialize & parse routines
+--
+-- see: https://www.w3.org/TR/DOM-Parsing/
+    
+-- this serialize method works on the basic xml domain object model
+local function _serialize (DOM, depth, stream, void_element, no_escape)
+  no_escape = no_escape or {}
+  local function serialize (dom, depth, stream)
+    local space = ' '
+    local function p(...) for _, x in ipairs {...} do stream[#stream+1] = x end; end
+    
+    local name = rawget (dom, 0) or '_'
+    if #stream ~= 0 then p ('\n') end   -- don't start with a blank line
+    p (space: rep (depth), '<', name)
+    for n,v in pairs (dom) do 
+      if type (n) == "string" then p (' ', n, '="', escape(tostring(v)), '"') end   -- attributes
+    end
+    if (void_element and void_element[name])  -- anything not in void_element must have separate closing tag (HTML)
+    or not void_element and (#dom == 0        -- no children, so may self-close (XML)
+    or (#dom == 1 and type(dom[1]) == "string" and #dom[1] == 0)) then  -- empty string
+    -- TODO: handle multiple string nodes?
+      p '/>'
+    else          -- child nodes
+      p '>'
+      for _,v in ipairs (dom) do
+        if type (v) == "table" and v[0] then 
+          serialize (v, depth+1, stream) 
+        else 
+          v = tostring(v)
+          if no_escape[name] then p (v) else p (escape(v)) end    -- for HTML <script> element, typically
+        end
+      end
+      p ('</', name, '>')
+    end
+    if depth == 0 then p '\n' end  -- add new line at end
+    return stream
+  end
+  return serialize (DOM or {}, depth or 0, stream or {})
+end
+
+
+-- _parse(), creates a DOM model.  The inverse of _serialize()
+local function _parse (xml)
   -- tag must start with a letter or underscore, 
   -- and can contain letters, digits, hyphens, underscores, and period.
   local tagname       = "([%a_][%w:_%-%.]*)"
@@ -190,343 +180,465 @@ local function decode (xml)
   local self_closing  = "%s*<" .. tagname .."([^<>]*)/>%s*"           -- <name attributes />
   local cdata         = "%s*<!%[CDATA%[.-%]%]>%s*"                    -- <![CDATA[ ... ]]>
   local comment       = "%s*<!%-%-.-%-%->%s*"                         -- <!-- comments -->
-  
--- simple DOM parser
--- note that the relationship navigation links are commented out for the time being
-  local function parse (text, parent)
-    local xml = {}
---    local previousSibling
-    for n,a,b in (text or ''): gmatch (elem_pair) do                  -- find matching opening and closing tags
-      local at = {}
-      for k,_,v in a: gmatch (attr_pair) do at[k] = unescape (v) end  -- get the attributes
-      local element = {
-        nodeName = n, 
---        parentNode = parent,                                          -- navigation links
---        previousSibling = previousSibling,
-        attributes = at}
-      local children = parse (b, element)                             -- get the children
-      if #children == 0 and #b > 0 then                               -- no children, empty strings are nil
-        element.nodeValue = unescape(b)                               -- plain text element
-      end
---      element.firstChild = children[1]
---      element.lastChild  = children[#children]
-      element.childNodes = children
-      xml[#xml+1] = setmetatable (element, meta)                      -- add the metamethods
---      if previousSibling then                                         -- sort out the siblings
---        previousSibling.nextSibling = element
---      end
---      previousSibling = element
+
+  local function parse (text, pop)
+    for n, a, b in (text or ''): gmatch (elem_pair) do                    -- find opening/closing tags
+      local element = createElement ()                                    -- new element
+      element[0] = n                                                      -- add name
+      element[-1] = pop                                                   -- add parent link
+      pop[#pop+1] = element                                               -- add it to the parent
+      for k,_,v in a: gmatch (attr_pair) do element[k] = unescape (v) end  -- get the attributes
+      parse (b, element)                                                   -- get the children, or...
+      element[1] = element[1] or #b > 0 and unescape(b) or nil             -- ... non-zero length text element
     end 
-   return xml 
   end
 
-  -- decode ()
-  if xml then                                             -- do one-off substitutions
-    xml = xml: gsub (cdata, '')                           -- remove CDATA
-    xml = xml: gsub (comment, '')                         -- remove comments
-    xml = xml: gsub (self_closing, "<%1%2></%1>")         -- expand self-closing tags
-    local document = parse (xml)
-    return setmetatable (document, {__index = {documentElement = document[1]}})
-  end
-  
+  local document = {}
+  if xml then                                           -- do one-off substitutions
+    xml = xml :gsub (cdata, '')                         -- remove CDATA
+              :gsub (comment, '')                       -- remove comments
+              :gsub (self_closing, "<%1%2></%1>")       -- expand self-closing tags
+    parse (xml, document)
+  end  
+  for _,root in ipairs (document) do root[-1] = nil end  -- root elements have no parent
+  return (unpack or table.unpack) (document)    -- separate return parameters for individual root elements
+                                                -- an XML document can have only one root element.
 end
 
-----------------------------------------------------
+
+---------------------------------------------------------------
 --
--- encode(), input argument should be a table, optional wrapper gives name tag to whole structure
--- Note that this function is NOT the inverse of decode() but operates on simple Lua tables
--- to produce an adequate XML representation of request responses which are usually sent as JSON.
--- It should, however, work on the output of simplify() (see below)
--- TODO: handle attributes correctly from simplify()
-local function encode (Lua, wrapper, preamble)
-  local xml = {preamble}        -- typically {'<?xml version="1.0"?>\n'}
-  local function p(x)
-    if type (x) ~= "table" then x = {x} end
-    for _, y in ipairs (x) do xml[#xml+1] = y end
-  end
-  
-  local function value (x, name, depth)
-    local function spc ()  p ((' '):rep (2*depth)) end
-    local function ztag () p {'</',name:match "^[^%s]+",'>\n'} end
-    local function attr (x) for a,b in pairs(x or {}) do p {' ', a, '="', escape(b), '"'} end end
-    local function atag (x) spc() ; p {'<', name}; attr(x); p '>' end
-    local function str (x) atag() ; p(escape (tostring(x): gsub("%s+", ' '))) ; ztag() end
-    local function err (x) error ("xml: unsupported data type "..type (x)) end
-    local function tbl (x)
-      local y
-      if #x == 0 then y = {x} else y = x end
-      for _, z in ipairs (y) do
-        if type(z) == "string" then atag(z)    -- 2018.07.07 handle multiple string values
-        else
-          if name then atag(z._attr) ; p '\n' end
-          local i = {}
-          for a in pairs (z) do if a ~= "_attr" then i[#i+1] = a end end
-          table.sort (i, function (a,b) return tostring(a) < tostring (b) end)
-          for _,a in ipairs (i) do value(z[a], a, depth+1) end
-          if name then spc() ; ztag() end
-        end
-      end
-    end
-    
-    local dispatch = {table = tbl, string = str, number = str}
-    return (dispatch [type(x)] or err) (x)
-  end
-  
-  -- encode(), wrapper parameter allows outer level of tags (with attributes)
-  local ok, msg = pcall (value, Lua, wrapper, 0) 
-  if ok then ok = table.concat (xml) end
-  return ok, msg
-end
-
-local function encodeDocument (Lua)
-  return encode (Lua, nil, '<?xml version="1.0"?>\n')
-end
-
-
--- simplify(), this yields a structure which can be encoded into XML
--- attributes on non-structured (string-only) elements are ignored
-local function simplify (x)
-  local children = {}
-  local function item (k,v)
-    local x = children[k] or {}
-    x[#x+1] = v
-    children[k] = x
-  end
-  for _,y in ipairs (x.childNodes or {}) do
-    item (y.nodeName, y.nodeValue or simplify(y))  -- what about attrs of node with nodeValue ???
-  end
-  for k,v in pairs (children) do
-    if #v == 1 then
-      if v._attr then 
-        -- problem here
-      else
-        v = v[1]       -- un-nest single element lists
-        if (type(v) == "table") and not next(v) then v = '' end   -- replace empty list with empty string        
-      end
-    children[k] = v
-    end
-  end
-  if next(x.attributes) then children._attr = x.attributes end
-  return children
-end
-
-
-----------------------------------------------------
+--    The following is all just decoration, really, which seeks to emulate
+--    at least some of the W3 standard for DOM models.
+--    
+--    See: https://www.w3.org/TR/2004/REC-DOM-Level-3-Core-20040407/core.html
+--   
+--    Additionally, there are factory methods for XML, HTML, and SVG documents, with convenience methods.
 --
--- 2019.03.22  encode Lua table as HTML element
--- named items are attributes, list is contents (possibly other elements)
--- element()
---
-local function element (name, contents)
-    
-  local self = {}
-  for n,v in pairs (contents or {}) do self[n] = v end    -- shallow copy of contents
-    
-  local function _serialize (self, stream, depth)
 
-    local function is_element (v) return type (v) == "table" and v._serialize end
-    
-    stream = stream or {}
-    depth = depth or 0
-    local space = ' '
-    
-    local function p(x) 
-      local s = stream
-      local t = type (x)
-      if t ~= "table" or is_element (x) then
-        s[#s+1] = x 
-      else
-        for _,v in ipairs (x) do s[#s+1] = v end
-      end
+-- in-order traversal of DOM tree with callback parameters (node, XPath) 
+local function in_order (node, callback, path)
+  path = table.concat {path or '', '/', node[0]}
+  callback (node, path)         -- start with the root node
+  for _, child in ipairs(node) do
+    if type (child) == "table" then in_order (child, callback, path) end    -- walk the tree
+  end
+end
+
+---------------------------------------------------------------
+--
+-- Node / Element
+--
+-- interface Node {}
+--
+
+-- NODE ATTRIBUTES
+
+local NodeAttributes = {}    -- to be embedded in an __index() function to simulate missing attributes
+
+  function NodeAttributes:nodeName   () return self[0]  end   -- reserved location in this object model
+  function NodeAttributes:tagName    () return self[0]  end   -- actually, an alias from the Element interface
+  function NodeAttributes:nodeValue  () return nil      end   -- NB: for Element nodes this is nil
+  function NodeAttributes:nodeType   () return 1        end   -- we only have one type: Element (+ Text & Document!)
+  function NodeAttributes:parentNode () return self[-1] end   -- reserved negative table index
+  function NodeAttributes:childNodes () return self     end   -- only numerical indices
+  function NodeAttributes:firstChild () return self[1]  end   -- first numerical index
+  function NodeAttributes:lastChild  () return #self >0 and self[#self] or nil end  -- last non-zero numerical index
+
+--  readonly attribute Node             previousSibling;  (TBD)
+--  readonly attribute Node             nextSibling;      (TBD)
+  
+  function NodeAttributes:attributes ()     -- NB: this is static, not 'LIVE'
+    local a = {}
+    for n,v in pairs(self) do 
+      if type(n) == "string" then a[n]=v end  -- only non-numeric indices
     end
-    
-    p {'\n', space: rep (depth), '<', name}
-    for n,v in pairs (self) do 
-      if type (n) == "string" then p {' ', n, '="', v, '"'} end
+    return a 
+  end 
+  
+  function NodeAttributes:ownerDocument () return self[-2] end   -- reserved negative table index
+  -- [-3] reserved for individual element metatable
+  -- [-4] and beyond, reserved  TODO: allocate user-defined Node table?
+  -- TODO: node.textContent should be ALL descendant node strings
+  function NodeAttributes:textContent() 
+    return type(self[1])=="string" and #self[1]>0 and self[1] or '' 
+    end 
+
+-- NODE METHODS
+
+local NodeMethods = {}
+
+  -- document fragments are represented as lists of elements appendChild {a,b,c}
+  function NodeMethods:appendChild (c)
+    if rawget (c,0) then c = {c} end  -- if no nodeName, then assume it's a document fragment
+    for _, x in ipairs (c) do
+      self[#self+1] = x
     end
-    if #self == 0 then
-      p '/>'
-    else
-      p '>'
-      for _,v in ipairs (self) do
-        if is_element (v) then v: _serialize (stream, depth+1) else p (v) end
-      end
-      p {'</', name, '>'}
-    end
-    return stream
+    return c  -- strictly, this should be an empty document fragment, if a fragment was the input argument
+  end
+
+  function NodeMethods:hasChildNodes() return #self > 0 end
+
+  -- getElementsByTagName()  in-order search by name (or wildcard '*') 
+  -- https://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html#ID-BBACDC08
+  -- actually, a method from the Element interface
+  function NodeMethods:getElementsByTagName (name)
+    local E = {}
+    local function nofilt (n) E[#E+1] = n end
+    local function filter (n) if n[0] == name then E[#E+1] = n end; end
+    in_order (self, name and name ~= '*' and filter or nofilt)
+    return E
   end
   
-  local meta
-  meta = {
-    __index = {
-      _name = name,
-      _serialize = _serialize,
-    },
-    __tostring = function (self) return table.concat (self:_serialize ()) end,
+--  NOT implemented...
+--  Node               insertBefore(in Node newChild, in Node refChild)
+--  Node               replaceChild(in Node newChild, in Node oldChild)
+--  Node               removeChild(in Node oldChild)
+--  Node               cloneNode(in boolean deep)
+  
+-- add above attributes and methods simulating some conventional DOM mode features.
+-- note that this may conflict with any element attributes which have 'reserved' names!!
+NodeMeta.__index = function (x,n)
+      if NodeAttributes[n] then return NodeAttributes[n](x) end  -- return pseudo-attribute method
+      return (rawget (x,-3) or {}) [n]               -- try the element-specific metatable at [-3] ...
+        or NodeMethods[n]                            -- ...or use Node methods
+    end
+
+NodeMeta.__tostring = function (self) return table.concat (_serialize(self)) end
+
+---------------------------------------------------------------
+--
+-- Document / DocumentTraversal
+
+-- DOCUMENT METHODS
+
+--  NOT implemented...
+--  Node               adoptNode(in boolean deep)
+--  Node               importNode(in Node importedNode, in boolean deep)
+ 
+local DocumentMethods = {
+    -- add key Node/Element methods to the document (in the W3 standard, it IS a Node)
+    appendChild = NodeMethods.appendChild,                    -- used to attach the root element
+    getElementsByTagName = function (self, name)
+      local root = self.documentElement
+      if not root then return {} end                          -- may be no root there, return empty list
+      return NodeMethods.getElementsByTagName (root, name)    -- apply to the root element
+    end,
   }
+
+--[[ note from: https://www.w3.org/TR/DOM-Level-2-Traversal-Range/traversal.html#Iterator-overview
+
+"A NodeIterator may be active while the data structure it navigates is being edited, so an iterator must behave gracefully in the face of change. Additions and removals in the underlying data structure do not invalidate a NodeIterator"
+
+NB: THIS IS NOT THE CASE HERE, since structures are navigated by Lua iterators!
+
+--]] 
+
+  -- nextNode()  in-order search of tree elements, with optional filter
+  -- https://www.w3.org/TR/DOM-Level-2-Traversal-Range/traversal.html#Iterator-overview
+  -- optional filter(element, path) returns true if element is to be included.
+  -- a method from the DocumentTraversal interface
+  -- this version returns only Element nodes (not text nodes, which are strings)
+  -- and is shorthand for:  document.createNodeIterator(node, SHOW_ELEMENT, filter).nextNode()
+  -- uses coroutines to turn the in_order() callback into an iterator
+  function DocumentMethods.nextNode (node, filter)
+    local function each_node (n, path)
+      if not filter or filter(n, path) then coroutine.yield (n) end     -- start with the root node
+    end
+    return coroutine.wrap (function () return in_order (node, each_node) end)
+  end
+
+  -- xpath() and xpathIterator()
+  -- see: https://www.w3.org/TR/xpath-10/
+  -- see: https://docs.python.org/2/library/xml.etree.elementtree.html#xpath-support
+  -- see: http://code.mios.com/trac/mios_genericutils/wiki/XPath          
+  -- only the abbreviated syntax expressions like  /a/b/c, //b/c, //b/* are implemented
   
-  meta.__index._method = meta.__index     -- usage:  function svg._method:my_method(...) ... end 
+  -- utility function to create a filter for a specific XPath starting at given node
+  local function createXPathfilter (node, path)
+    path = path :gsub ("^//", '/' .. node[0] .. '/')            -- fix the full path name
+--              :gsub ("/(%w+)%(%)$", fct)                      -- remove /fct(), but note presence
+                :gsub ('*', "[^/]+")                            -- wildcard works within each level only
+    path = table.concat {'^', path, '$'}                        -- match the WHOLE path
+    return function (_,p) return p: match (path) end
+  end
+    
+  -- xpathIterator (node, path)
+  -- a bit like nextNode() but matching an XPath rather than a nodeName... 
+  function DocumentMethods.xpathIterator (node, path)
+    local filter = createXPathfilter (node, path)
+    return DocumentMethods.nextNode (node, filter)  -- ...in fact, it uses nextNode() !
+  end
 
-  return setmetatable (self, meta)
+  -- xpath() returns a list of elements which match the given XPath
+  -- a bit like getElementsByTagName(), but using XPath expressions
+  function DocumentMethods.xpath (node, path)
+    local E = {}
+    local xfilter = createXPathfilter (node, path)
+    local function filter (n, p) if xfilter(n, p) then E[#E+1] = n end; end
+    in_order (node, filter)
+    return E
+  end
 
+
+-- add above methods to documents through a metatable function
+local docMeta = {
+  __tostring = function(self) return table.concat(_serialize(self[1], 0,
+      { rawget (self, "preamble") },      -- DOCTYPE etc.
+        rawget (self, "void_elements"),   -- self-closing HTML tags
+        rawget (self, "no_escape")))      -- HTML <script> (possibly others)
+    end,
+  __index = function (self, tag)    -- just add any unknown tag as a new element...
+    local de = rawget (self, 1)
+    if tag == "documentElement" then return de end  -- can be nil!
+    if de and de[0]:lower() == "html" then          -- HTML specific attributes
+      -- see: https://www.w3.org/TR/DOM-Level-2/html.html#ID-26809268
+      if tag == "title" then return de[1][1][1] end  
+      if tag == "body"  then return de[2] end
+      if tag == "forms" then return de[2]: getElementsByTagName "form" end
+    end
+    local fct
+    if type (tag) == "string" then  -- 2019.08.08 ignore references to missing numeric array elements, etc.
+      fct = function(contents) return self.createElement(tag, contents) end  -- specific to document type
+      rawset (self, tag, fct)
+    end
+    return fct
+  end}
+
+---------------------------------------------------------------
+--
+-- XML
+--
+
+local function createDocument  ()
+  local d = {[0] = "#document", doctype = "xml"}                            -- the document node
+  d.createElement = createElement                                           -- ...a way to make new elements
+  d.preamble = '<?xml version="1.0"?>'
+  for n,v in pairs (DocumentMethods) do d[n] = v end                  -- add useful methods
+  return setmetatable (d, docMeta)           -- add the meta function for creating elements
 end
 
 
-----------------------------------------------------
+---------------------------------------------------------------
 --
--- 2019.03.22  HTML and SVG
---
-
-local html5 = setmetatable ({},
-  {__index = function (self, tag)    -- 2019.04.06  just add any unknown tag as a new element...
-    local fct = function(contents) return element(tag, contents) end
-    rawset (self, tag, fct)
-    return fct
-  end})
-  
---
--- tables
+-- HTML
 --
 
-function html5.table (attr)
-  
-  local tbl = element ("table", attr)
-  
+local HtmlConvenience = {}      -- HTML document convenience methods
+
+-- create a table row, head indicates a header row
+function HtmlConvenience.trow (r, head)
+  local typ = head and "th" or "td"
+  local items = {}
+  for _, x in ipairs (r or {}) do
+    items[#items+1] = createElement (typ, 
+      (type(x) ~= "table" or x[0])    -- x[0] has element name
+        and {x}                       -- simple element (eg. string), or
+        or x)                         -- else it's got some attributes
+  end
+  return createElement ("tr", items)
+end
+   
+function HtmlConvenience.table (attr)
   local rows = 0
+  local tbl = createElement ("table", attr)
   
-  local function make_row (typ, r)
-    local items = {}
-    for _, x in ipairs (r or {}) do
-      local y
-      if type(x) ~= "table" or x._name then
-        y = element (typ, {x})
-      else
-        y = element (typ, x)  -- else it's got some attributes
-      end
-      items[#items+1] = y 
-    end
-    local tr = element ("tr", items)
+  -- create a table row, head indicates a header row
+  local function make_row (...)
+    local tr = HtmlConvenience.trow (...)
     tbl[#tbl+1] = tr
     return tr
   end
-      
-  -- add specific constructors and other methods
+  
+  -- convenience methods for headers and rows
   -- note that these can be called with colon (:) or dot (.) notation for compatibility
   
-  function tbl._method.header (h1, h2) return make_row ("th", h2 or h1) end  
-  function tbl._method.row (r1, r2)    rows = rows + 1; return make_row ("td", r2 or r1) end
-  function tbl._method.length ()        return rows end
+  local function header (h1, h2) return make_row (h2 or h1, true) end  
+  local function row (r1, r2)    rows = rows + 1; return make_row (r2 or r1) end
+  local function length ()       return rows end
+  
+  rawset (tbl,-3, {header = header, row = row, length = length})   -- add specific metamethods to table element
   
   return tbl
 end
 
+
+-- differences between HTML and XML:
+-- case-insensitive tag names, a finite but very large number of possible tags
+-- this implementation allows ANY tag name (folded to lowercase) in the same way that XML does.
+-- document is created with HTML, HEAD, TITLE, and BODY elements
+-- and attributes to get/set TITLE and BODY contents
+-- see: https://www.w3.org/TR/DOM-Level-2/html.html#ID-HTML-DOM
+-- <script> element contents are not escaped
+-- void elements are self-closing, all others are not
+-- see: https://html.spec.whatwg.org/multipage/syntax.html#void-elements
+
+local HTML_void_elements = {} do
+  local void = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+  for _, n in ipairs (void) do HTML_void_elements[n] = true end
+end
+
+local HTML_unescaped_elements = {script = true}
+
+local function createHTMLDocument  (title)
+  local d = {[0] = "#document", doctype = "html"}                                   -- the document node
+  d.createElement = function (tag, xxx) return createElement(tag:lower(), xxx) end  -- force lowercase
+  d.preamble = "<!DOCTYPE html>"
+  d.void_elements = HTML_void_elements
+  d.no_escape = HTML_unescaped_elements
+  for n,v in pairs (DocumentMethods) do d[n] = v end                  -- add useful methods
+  for n,v in pairs (HtmlConvenience) do d[n] = v end                  -- add convenience methods
+  local doc = setmetatable (d, docMeta)           -- add the meta function for creating elements
+  -- add the additional HTML elements to the basic document
+  doc:appendChild {
+    doc.html {
+      doc.head {doc.title (title)},
+      doc.body {}}}
+  -- remove newly-created functions for title and body, since they are, in fact, HTML document attributes
+  doc.title = nil   
+  doc.body = nil
+  return doc
+end
+
+---------------------------------------------------------------
 --
 -- SVG: Scalable Vector Graphics
 --
+ 
+local function add_props (s, props)
+  for n,v in pairs (props or {}) do s[n] = v end
+  return s
+end
 
-local function add_svg_functions (svg)
+local function coords (xs,ys)
+  local poly = {}
+  local coord = "%0.1f,%0.1f "
+  for i , x in ipairs(xs) do
+    poly[i] = coord: format(x, ys[i])
+  end
+  return table.concat (poly)
+end
+
+local SvgConvenience = {}
+
+function SvgConvenience.polyline (xs,ys, props)
+  return createElement ("polyline", add_props ({points=coords (xs,ys)}, props))
+end
+
+function SvgConvenience.polygon (xs,ys, props)
+  return createElement ("polygon", add_props ({points=coords (xs,ys)}, props))
+end
+
+function SvgConvenience.rect (x,y, width,height, props)
+  return createElement ("rect", add_props ({x = x, y = y, width = width, height = height}, props))
+end
+
+-- circle
+function SvgConvenience.circle (cx,cy, radius, props)
+  return createElement ("circle", add_props ({cx = cx, cy = cy, r = radius}, props))
+end
+
+-- ellipse
+function SvgConvenience.ellipse (cx,cy, rx, ry, props)
+  return createElement ("ellipse", add_props ({cx = cx, cy = cy, rx = rx, ry = ry}, props))
+end
+
+-- line
+function SvgConvenience.line (x1,y1, x2,y2, props)
+  return createElement ("line", add_props ({x1 = x1, y1 = y1, x2 = x2, y2 = y2}, props))
+end
+
+-- path
+function SvgConvenience.path (d, props)
+  return createElement ("path", add_props ({d = d}, props))
+end
+
+-- text
+function SvgConvenience.text (x,y, txt)
+  if type (txt) == "string" then txt = {txt} end
+  return createElement ("text", add_props ({x = x, y = y}, txt))
+end
+
+function SvgConvenience.title (txt)    -- required for mouseover popup
+  if type (txt) == "string" then txt = {txt} end
+  return createElement ("title", txt)
+end
+
+function SvgConvenience.g (txt)    -- required SVG root element!
+  if type (txt) == "string" then txt = {txt} end
+  return createElement ("g", txt)
+end
+
+function SvgConvenience.svg (txt)    -- required SVG root element!
+  if type (txt) == "string" then txt = {txt} end
+  return createElement ("svg", txt)
+end
+
+
+-- differences between SVG and HTML / XML:
+-- document root element should have "svg" tag
+-- and xmlns="http://www.w3.org/2000/svg"
+-- VERY limited set of tags (this implementation flags illegal/unknown tags by raising an error)
+local function createSVGDocument ()
+  local d = {[0] = "#document", doctype = "svg"}                      -- the document node
+  d.createElement = function (tag) 
+    error ("SVG: illegal tagName: " .. (tag or '?'), 2)               -- no unknown tag names allowed
+  end
+  for n,v in pairs (DocumentMethods) do d[n] = v end                  -- add useful methods
+  for n,v in pairs (SvgConvenience) do d[n] = v end                   -- add convenience methods
+  return setmetatable (d, docMeta)           -- add the meta function for creating elements
+end
+
+
+-------------------------------------
+
+-- return decoded text as a full document model, of appropriate type
+local function decode (xml)
+  local root = _parse (xml) 
+  local doctype = (root and root[0] or ''): lower ()
+  local d = 
+    (doctype == "html") and createHTMLDocument () or
+    (doctype ==  "svg") and createSVGDocument  () or
+    createDocument   () --  plain old XML
     
-  local function add_props (s, props)
-    for n,v in pairs (props or {}) do s[n] = v end
-    return s
+  if root then 
+    root[-1] = nil      -- ensure no parent
+    d[1] = root         -- add the actual node tree to document
   end
   
-  local function add_to (p, e)
-    p[#p+1] = e
-    return e
+  if doctype == "html" then
+    in_order (d, function (node)                          -- visit each Element node
+        local name = node[0]: lower()                     -- force all HTML tag names to lowercase
+        node[0]  = name
+        node[-2] = d                                      -- add ownerDocument
+        if HTML_unescaped_elements[name] then
+          node[1] = unescape (tostring (node[1] or ''))   -- unescape any <script> elements 
+        end
+      end)
+    -- TODO: check for correct HTML doc structure: 
+    --       <head><title>...</title></head><body>...</body></html>
+  else
+    in_order (d, function (node) node[-2] = d end)        -- add ownerDocument to each Element node
   end
-  
-  local function coords (xs,ys)
-    local poly = {}
-    local coord = "%0.1f,%0.1f "
-    for i , x in ipairs(xs) do
-      poly[i] = coord: format(x, ys[i])
-    end
-    return table.concat (poly)
-  end
-  
-  function svg._method:polyline (xs,ys, props)
-    return add_to (self, element ("polyline", add_props ({points=coords (xs,ys)}, props)))
-  end
-  
-  function svg._method:polygon (xs,ys, props)
-    return add_to (self, element ("polygon", add_props ({points=coords (xs,ys)}, props)))
-  end
-  
-  function svg._method:rect (x,y, width,height, props)
-    return add_to (self, element ("rect", add_props ({x = x, y = y, width = width, height = height}, props)))
-  end
-  
-  svg._method.rectangle = svg._method.rect   -- add method alias
-  
-  -- circle
-  function svg._method:circle (cx,cy, radius, props)
-    return add_to (self, element ("circle", add_props ({cx = cx, cy = cy, r = radius}, props)))
-  end
-  
-  -- ellipse
-  
-  -- line
-  function svg._method:line (x1,y1, x2,y2, props)
-    return add_to (self, element ("line", add_props ({x1 = x1, y1 = y1, x2 = x2, y2 = y2}, props)))
-  end
-  
-  -- path
-  
-  -- text
-  function svg._method:text (x,y, txt)
-    if type (txt) == "string," then txt = {txt} end
-    return add_to (self, element ("text", add_props ({x = x, y = y}, txt)))
-  end
-  
-  -- group
-  function svg._method:group (attr)  
-    local g = element ("g", attr)  
-    add_svg_functions(g)
-    return add_to (self, g)
-  end
-  
-  svg._method.g = svg._method.group   -- add method alias
-  
-  -- not automatically added to SVG element
-  function svg._method:title (attr)
-    return element ("title", attr)
-  end
-  
-end
 
-
-function html5.svg (attr)    
-  local svg = element ("svg", attr)  
-  add_svg_functions(svg)
-  return svg
-end
-
-function html5.document (contents)
-  local doc = element ("html", contents)
-  return table.concat (doc:_serialize {"<!DOCTYPE html>"})
+  return d
 end
 
 -------------------------------------
 
-
 return {
     
-    -- XML
+    escape   = escape,
+    unescape = unescape,
     
-    escape    = escape,
-    unescape  = unescape,
+    decode = decode,    -- return an XML, HTML, or SVG, DOM Document representing parsed string
     
-    decode    = decode, 
-    encode    = encode,
-    simplify  = simplify,
+    -- 2019.07.11  create instances of Document interface for XML, HTML, and SVG
     
-    encodeDocument  = encodeDocument,
-    documentElement = documentElement,
-    
-    -- 2019.03.22   HTML5 and SVG
-    
-    html5 = html5,
+    createDocument     = createDocument,        -- generic XML document
+    createHTMLDocument = createHTMLDocument,    -- HTML document with convenience methods
+    createSVGDocument  = createSVGDocument,     -- SVG document with convenience methods
 
   }
 

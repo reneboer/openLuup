@@ -1,19 +1,21 @@
 ABOUT = {
   NAME          = "AltAppStore",
-  VERSION       = "2018.06.28",
+  VERSION       = "2020.03.30",
   DESCRIPTION   = "update plugins from Alternative App Store",
   AUTHOR        = "@akbooer / @amg0 / @vosmont",
-  COPYRIGHT     = "(c) 2013-2018",
+  COPYRIGHT     = "(c) 2013-2020",
   DOCUMENTATION = "https://github.com/akbooer/AltAppStore",
+  DEBUG         = false,
+  LICENSE       = [[
+  This program is free software: you can redistribute it and/or modify
+  it under the condition that it is for private or home useage and 
+  this whole comment is reproduced in the source code file.
+  Commercial utilisation is not authorized without the appropriate written agreement.
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE . 
+]]
 }
-
--- // This program is free software: you can redistribute it and/or modify
--- // it under the condition that it is for private or home useage and 
--- // this whole comment is reproduced in the source code file.
--- // Commercial utilisation is not authorized without the appropriate written agreement.
--- // This program is distributed in the hope that it will be useful,
--- // but WITHOUT ANY WARRANTY; without even the implied warranty of
--- // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE . 
 
 -- Plugin for Vera and openLuup
 --
@@ -49,10 +51,15 @@ and partially modelled on the InstalledPlugins2 structure in Vera user_data.
 -- 2018.06.11   report total size downloaded in kB (not bytes!)
 -- 2018.06.28   correct non-alphanumeric handling in download directory 
 
+-- 2020.03.03   add log output of request metadata (for diagnostics)
+-- 2020.03.28   fix recent release error handling
+-- 2020.03.29   incorporate modified version of @reneboer's GitHub access fix
+--              see: https://github.com/akbooer/openLuup/pull/21
+
 
 local https     = require "ssl.https"
 local lfs       = require "lfs"
-local ltn12     = require "ltn12"
+--local ltn12     = require "ltn12"
 
 local json
 local Vera = luup.attr_get "SvnVersion"
@@ -91,6 +98,8 @@ local icon_folder = icon_directories[(luup.version_minor == 0 ) or luup.version_
 local ludl_folder = ludl_directories[(luup.version_minor == 0 ) or luup.version_major]
 
 local _log = function (...) luup.log (table.concat ({ABOUT.NAME, ':', ...}, ' ')) end
+
+local _debug = function (...) if ABOUT.DEBUG then _log (...) end; end
 
 local pathSeparator = '/'
 
@@ -171,7 +180,7 @@ local _ = {
 function GitHub (archive)     -- global for access by other modules
 
   -- get and decode GitHub url
-
+--[[
   local function git_request (request)
     local decoded
     local response = {}
@@ -185,13 +194,30 @@ function GitHub (archive)     -- global for access by other modules
     _log ("GitHub request: " .. request)
     if r then 
       decoded, errmsg = json.decode (response)
+      _debug ("GitHub RESPONSE: " .. response)
     else
       errmsg = c
       _log ("ERROR: " .. (errmsg or "unknown"))
     end
     return decoded, errmsg
   end
+ --]]
   
+  -- get and decode GitHub url
+  local function git_request (request)
+    _log ("GitHub request: " .. request)
+    
+    local fd = io.popen ("curl " .. request)
+    local response = fd:read "*a"
+    fd:close()
+    
+    if response then return json.decode (response) end
+    
+    local errmsg = "ERROR: reading GitHub file"
+    _log (errmsg)
+    return nil, errmsg
+  end
+ 
   -- return a table of tagged releases, indexed by name, 
   -- with GitHub structure including commit info
   local function get_tags ()
@@ -468,6 +494,8 @@ function update_plugin_run(args)
     return false                            -- failure
   end
   
+  _debug ((json.encode(meta)))
+
   local d = meta.devices
   local p = meta.plugin
   local r = meta.repository

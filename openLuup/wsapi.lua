@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "openLuup.wsapi",
-  VERSION       = "2019.05.06",
+  VERSION       = "2019.08.12",
   DESCRIPTION   = "a WSAPI application connector for the openLuup port 3480 server",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2019 AKBooer",
@@ -36,7 +36,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ]]
 }
 
--- This module implements a WSAPI application connector for the openLuup port 3480 server.
+-- This module implements a WSAPI (Web Server API) application connector for the openLuup port 3480 server.
 --
 -- see: http://keplerproject.github.io/wsapi/
 -- and: http://keplerproject.github.io/wsapi/license.html
@@ -57,11 +57,15 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 -- 2016.10.17  use CGI aliases from external servertables module
 
 -- 2017.01.12  remove leading colon from REMOTE_PORT metavariable value
+
 -- 2018.07.14  improve error handling when calling CGI
 -- 2018.07.20  add the Kepler project request and response libraries
 -- 2018.07.27  export the util module with url_encode() and url_decode()
 
 -- 2019.05.06  improve CGI .lua log message
+-- 2019.07.17  include complete WSAPI util module rather than socket.url (to decode '+' signs correctly)
+-- 2019.07.28  create global make_env(), used by HTTP server to include in request objects
+
 
 --[[
 
@@ -95,7 +99,6 @@ The connectors are careful to treat errors gracefully: if they occur before send
 local loader  = require "openLuup.loader"       -- to create new environment in which to execute CGI script 
 local logs    = require "openLuup.logs"         -- used for wsapi_env.error:write()
 local tables  = require "openLuup.servertables" -- used for CGI aliases
-local url     = require "socket.url"            -- for request library utilities
 
 --  local log
 local function _log (msg, name) logs.send (msg, name or ABOUT.NAME) end
@@ -225,17 +228,14 @@ SERVER_NAME 	  Your server's fully qualified domain name (e.g. www.cgi101.com)
 SERVER_PORT 	  The port number your server is listening on
 SERVER_SOFTWARE The server software you're using (e.g. Apache 1.3)
 
-
 --]]
--- cgi is called by the server when it receives a GET or POST CGI request
--- request object parameter:
--- { {url.parse structure} , {headers}, post_content_string, method_string, http_version_string }
 
-local function cgi (request)
-  
-  local URL = request.URL
-  local headers = request.headers
-  local post_content = request.post_content
+-- build a WSAPI environment from parameters:
+--      url.path, url.query , {headers}, post_content_string, method_string, http_version_string 
+-- only the first parameter is required
+local function make_env (path, query, headers, post_content, method, http_version)
+  headers = headers or {}
+  post_content = post_content or ''
   
   local meta = {
     __index = function () return '' end;  -- return the empty string instead of nil for undefined metavariables
@@ -254,7 +254,7 @@ local function cgi (request)
   
   local error = {
     write = function (self, ...) 
-      local msg = {URL.path or '?', ':', ...}
+      local msg = {path or '?', ':', ...}
       for i, m in ipairs(msg) do msg[i] = tostring(m) end             -- ensure everything is a string
       _log (table.concat (msg, ' '), "openLuup.wsapi.cgi") 
     end;
@@ -264,27 +264,30 @@ local function cgi (request)
     
     TEST = {headers = headers},     -- so that test CGIs (or unit tests) can examine all the headers
     
+    -- note that the metatable will return an empty string for any undefined environment parameters
     ["CONTENT_LENGTH"]  = #post_content,
-    ["CONTENT_TYPE"]    = headers["Content-Type"] or '',
+    ["CONTENT_TYPE"]    = headers["Content-Type"],
     ["HTTP_USER_AGENT"] = headers["User-Agent"],
     ["HTTP_COOKIE"]     = headers["Cookie"],
     ["REMOTE_HOST"]     = headers ["Host"],
     ["REMOTE_PORT"]     = (headers ["Host"] or ''): match ":(%d+)$",
-    ["REQUEST_METHOD"]  = request.method,
-    ["SCRIPT_NAME"]     = URL.path,
-    ["SERVER_PROTOCOL"] = request.http_version,
+    ["REQUEST_METHOD"]  = method or "GET",
+    ["SCRIPT_NAME"]     = path,
+    ["SERVER_PROTOCOL"] = http_version or "HTTP/1.1",
     ["PATH_INFO"]       = '/',
-    ["QUERY_STRING"]    = URL.query,
+    ["QUERY_STRING"]    = query,
   
     -- methods
     input = input,
     error = error,
   }
   
-  local wsapi_env = setmetatable (env, meta)
-   
-  -- execute the CGI
-  local script = URL.path or ''  
+  return setmetatable (env, meta)
+end
+
+-- cgi is called by the server when it receives a GET or POST CGI request
+local function cgi (wsapi_env)       -- 2019.07.28  now called with a pre-built environment!
+  local script = wsapi_env.SCRIPT_NAME  
   
   script = script: match "^/?(.-)/?$"      -- ignore leading and trailing '/'
   
@@ -305,11 +308,7 @@ local function cgi (request)
     _log ("ERROR: " .. message)
     status = 500    -- Internal server error
     responseHeaders = { ["Content-Type"] = "text/plain" }
-    iterator = function ()
-      local line = message
-      message = nil
-      return line
-    end
+    iterator = function () local x = message; message = nil; return x end
   end
 
   return status, responseHeaders, iterator
@@ -320,19 +319,214 @@ end
 --
 -- The original WSAPI has a number of additional libraries
 -- see: https://keplerproject.github.io/wsapi/libraries.html
--- here, the request and response libraries are included.
+-- here, the request, response, and util libraries are included.
 -- use in a CGI file like this:
 --    local wsapi = require "openLuup.wsapi" 
 --    local req = wsapi.request.new(wsapi_env)
 --    local res = wsapi.response.new([status, headers])
 
+
 ------------------------------------------------------
 
--- substitute utility library methods with alternatives
-local util = {
-  url_decode  = url.unescape,
-  url_encode  = url.escape,
-}
+--
+-- utility library, this is the verbatim keplerproject code 
+-- see: https://github.com/keplerproject/wsapi/blob/master/src/wsapi/util.lua
+--
+
+local function _M_util ()
+  
+  local _M = {}
+
+  ----------------------------------------------------------------------------
+  -- Decode an URL-encoded string (see RFC 2396)
+  ----------------------------------------------------------------------------
+  function _M.url_decode(str)
+    if not str then return nil end
+    str = string.gsub (str, "+", " ")
+    str = string.gsub (str, "%%(%x%x)", function(h) return string.char(tonumber(h,16)) end)
+    str = string.gsub (str, "\r\n", "\n")
+    return str
+  end
+
+  ----------------------------------------------------------------------------
+  -- URL-encode a string (see RFC 2396)
+  ----------------------------------------------------------------------------
+  function _M.url_encode(str)
+    if not str then return nil end
+    str = string.gsub (str, "\n", "\r\n")
+    str = string.gsub (str, "([^%w ])",
+          function (c) return string.format ("%%%02X", string.byte(c)) end)
+    str = string.gsub (str, " ", "+")
+    return str
+  end
+
+  ----------------------------------------------------------------------------
+  -- Sanitizes all HTML tags
+  ----------------------------------------------------------------------------
+  function _M.sanitize(text)
+     return text:gsub(">", "&gt;"):gsub("<", "&lt;")
+  end
+
+  ----------------------------------------------------------------------------
+  -- Checks whether s is not nil or the empty string
+  ----------------------------------------------------------------------------
+  function _M.not_empty(s)
+    if s and s ~= "" then return s else return nil end
+  end
+
+  ----------------------------------------------------------------------------
+  -- Wraps the WSAPI environment to make the input rewindable, so you
+  -- can parse postdata more than once, call wsapi_env.input:rewind()
+  ----------------------------------------------------------------------------
+  function _M.make_rewindable(wsapi_env)
+     local new_env = { input = { position = 1, contents = "" } }
+     function new_env.input:read(size)
+        local left = #self.contents - self.position + 1
+        local s
+        if left < size then
+           self.contents = self.contents .. wsapi_env.input:read(size - left)
+           s = self.contents:sub(self.position)
+           self.position = #self.contents + 1
+        else
+           s = self.contents:sub(self.position, self.position + size)
+           self.position = self.position + size
+        end
+        if s == "" then return nil else return s end
+     end
+     function new_env.input:rewind()
+        self.position = 1
+     end
+     return setmetatable(new_env, { __index = wsapi_env, __newindex = wsapi_env })
+  end
+
+  ----------------------------------------------------------------------------
+  -- getopt, POSIX style command line argument parser
+  -- param arg contains the command line arguments in a standard table.
+  -- param options is a string with the letters that expect string values.
+  -- returns a table where associated keys are true, nil, or a string value.
+  -- The following example styles are supported
+  --   -a one  ==> opts["a"]=="one"
+  --   -bone   ==> opts["b"]=="one"
+  --   -c      ==> opts["c"]==true
+  --   --c=one ==> opts["c"]=="one"
+  --   -cdaone ==> opts["c"]==true opts["d"]==true opts["a"]=="one"
+  -- note POSIX demands the parser ends at the first non option
+  --      this behavior isn't implemented.
+  ----------------------------------------------------------------------------
+  function _M.getopt( arg, options )
+    local tab, args = {}, {}
+    local k = 1
+    while k <= #arg do
+      local v = arg[k]
+      if string.sub( v, 1, 2) == "--" then
+        local x = string.find( v, "=", 1, true )
+        if x then tab[ string.sub( v, 3, x-1 ) ] = string.sub( v, x+1 )
+        else      tab[ string.sub( v, 3 ) ] = true
+        end
+        k = k + 1
+      elseif string.sub( v, 1, 1 ) == "-" then
+        local y = 2
+        local l = #v
+        local jopt
+        local next = 1
+        while ( y <= l ) do
+          jopt = string.sub( v, y, y )
+          if string.find( options, jopt, 1, true ) then
+            if y < l then
+              tab[ jopt ] = string.sub( v, y+1 )
+              y = l
+            else
+              tab[ jopt ] = arg[ k + 1 ]
+              next = 2
+            end
+          else
+            tab[ jopt ] = true
+          end
+          y = y + 1
+        end
+        k = k + next
+      else
+        args[#args + 1] = v
+        k = k + 1
+      end
+    end
+    return tab, args
+  end
+
+  ----------------------------------------------------------------------------
+  -- Makes a mock WSAPI environment with GET method and the provided
+  -- query string
+  ----------------------------------------------------------------------------
+  function _M.make_env_get(qs)
+    return {
+      REQUEST_METHOD = "GET",
+      QUERY_STRING = qs or "",
+      CONTENT_LENGTH = 0,
+      PATH_INFO = "/",
+      SCRIPT_NAME = "",
+      CONTENT_TYPE = "x-www-form-urlencoded",
+      input = {
+        read = function () return nil end
+      },
+      error = {
+        messages = {},
+        write = function (self, msg)
+          self.messages[#self.messages+1] = msg
+        end
+      }
+    }
+  end
+
+  ----------------------------------------------------------------------------
+  -- Makes a mock WSAPI environment with POST method and the provided
+  -- postdata, type (x-www-form-urlenconded default) and query string
+  ----------------------------------------------------------------------------
+  function _M.make_env_post(pd, type, qs)
+    pd = pd or ""
+    return {
+      REQUEST_METHOD = "POST",
+      QUERY_STRING = qs or "",
+      CONTENT_LENGTH = #pd,
+      PATH_INFO = "/",
+      CONTENT_TYPE = type or "x-www-form-urlencoded",
+      SCRIPT_NAME = "",
+      input = {
+        post_data = pd,
+        current = 1,
+        read = function (self, len)
+          if self.current > #self.post_data then return nil end
+          local s = self.post_data:sub(self.current, len)
+          self.current = self.current + len
+          return s
+        end
+      },
+      error = {
+        messages = {},
+        write = function (self, msg)
+          self.messages[#self.messages+1] = msg
+        end
+      }
+    }
+  end
+
+  function _M.loadfile(filename, env)
+    if _VERSION ~= "Lua 5.1" then
+      return loadfile(filename, "bt", env)
+    else
+      local f, err = loadfile(filename)
+      if not f then
+        return nil, err
+      end
+      setfenv(f, env)
+      return f
+    end
+  end
+
+  return _M
+
+end
+
+local util = _M_util ()  -- create version for the following to access
 
 ----------
 --
@@ -730,11 +924,12 @@ return {
     ABOUT = ABOUT,
     TEST  = {build = build},        -- access to 'build' for testing
      
-    cgi   = cgi,                    -- called by the server to process a CGI request
+    cgi       = cgi,                -- called by the server to process a CGI request
+    make_env  = make_env,           -- create wsapi_env from basic HTTP request
     
     -- modules
     
-    util      = util,               -- only url_decode() and url_encode() implemented
+    util      =  util,              -- already instantiated
     request   = _M_request (),
     response  = _M_response (),
     

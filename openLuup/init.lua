@@ -1,12 +1,12 @@
 local ABOUT = {
   NAME          = "openLuup.init",
-  VERSION       = "2019.03.14",
+  VERSION       = "2020.04.03",
   DESCRIPTION   = "initialize Luup engine with user_data, run startup code, start scheduler",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -47,12 +47,19 @@ local ABOUT = {
 -- 2018.03.09  add SMTP server
 -- 2018.04.04  add POP3 server
 -- 2018.04.23  re-order module loading (to tidy startup log banners)
--- 2018.04.25  change server module name back to http, and use opeLuup.HTTP... attributes
+-- 2018.04.25  change server module name back to http, and use openLuup.HTTP... attributes
 -- 2018.05.25  add Data Historian configuration
 -- 2018.05.29  remove HTTP.WgetAuthorization option
 -- 2018.06.14  rename openLuup.Databases to openLuup.DataStorageProvider
 
 -- 2019.03.14  change openLuup parameter comment style
+-- 2019.06.12  move compile_and_run to loader (to be used also by console)
+-- 2019.06.14  add Console options
+-- 2019.07.31  use new server module (name reverted from http)
+-- 2019.10.14  set HTTP client port with client.start()
+
+-- 2020.03.18  report correct HTTP port in startup error message
+-- 2020.04.03  use optional arg[2] to define HTTP server port
 
 
 local logs  = require "openLuup.logs"
@@ -67,7 +74,8 @@ local loader = require "openLuup.loader"  -- keep this first... it prototypes th
 
 luup = require "openLuup.luup"            -- here's the GLOBAL luup environment
 
-local http          = require "openLuup.http"
+local client        = require "openLuup.client"   -- HTTP client
+local server        = require "openLuup.server"   -- HTTP server
 local smtp          = require "openLuup.smtp"
 local pop3          = require "openLuup.pop3"
 local scheduler     = require "openLuup.scheduler"
@@ -78,23 +86,6 @@ local json          = require "openLuup.json"
 local historian     = require "openLuup.historian"
 
 local mime  = require "mime"
-
--- what it says...
-local function compile_and_run (lua, name)
-  _log ("running " .. name)
-  local startup_env = loader.shared_environment    -- shared with scenes
-  local source = table.concat {"function ", name, " () ", lua, '\n', "end" }
-  local code, error_msg = 
-  loader.compile_lua (source, name, startup_env) -- load, compile, instantiate
-  if not code then 
-    _log (error_msg, name) 
-  else
-    local ok, err = scheduler.context_switch (nil, code[name])  -- no device context
-    if not ok then _log ("ERROR: " .. err, name) end
-    code[name] = nil      -- remove it from the name space
-  end
-end
-
 
 -- heartbeat monitor for memory usage and checkpointing
 local chkpt = 1
@@ -118,7 +109,6 @@ end
 do -- change search paths for Lua require
   local cmh_lu = ";../cmh-lu/?.lua;files/?.lua;openLuup/?.lua"
   package.path = package.path .. cmh_lu       -- add /etc/cmh-lu/ to search path
---  loader.icon_redirect ''                   -- remove all prefix paths for icons
 end
 
 do -- Devices 1 and 2 are the Vera standard ones (but #2, _SceneController, replaced by openLuup)
@@ -143,6 +133,11 @@ do -- set attributes, possibly decoding if required
       Compress = "LZAP",
       Directory = "backup/",
     },
+    Console = {
+      Menu = "",           -- add user-defined menu JSON definition file here
+      Ace_URL = "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.5/ace.js",
+      EditorTheme = "eclipse",
+    },
     DataStorageProvider = {
       ["-- Influx"]   = "172.16.42.129:8089",
       ["-- Graphite"] = "127.0.0.1:2003",
@@ -154,7 +149,7 @@ do -- set attributes, possibly decoding if required
       Incoming  = "true",
     },
     Status = {
-      IP = http.myIP,
+      IP = server.myIP,
       StartTime = os.date ("%Y-%m-%dT%H:%M:%S", timers.loadtime),
     },
     UserData = {
@@ -217,7 +212,7 @@ do -- STARTUP
     update_plugin_run {metadata = metadata}             -- <run> phase
     repeat until update_plugin_job () ~= 0              -- <job> phase
   end
-  
+
   local f = io.open (init, 'rb')                          -- may be binary compressed file 
   if f then 
     local code = f:read "*a"
@@ -229,14 +224,17 @@ do -- STARTUP
         code = compress.lzap.decode (code, codec)         -- uncompress the file
       end
 
-      local ok = true
+      local ok, err
       local json_code = code: match "^%s*{"               -- what sort of code is this?
       if json_code then 
         ok = userdata.load (code)
         code = userdata.attributes ["StartupCode"] or ''  -- substitute the Startup Lua
       end
-      compile_and_run (code, "_openLuup_STARTUP_")        -- the given file or the code in user_data
-    else
+      local name = "_openLuup_STARTUP_"
+      _log ("running " .. name)
+      ok, err = loader.compile_and_run (code, name)        -- the given file or the code in user_data
+      if not ok then _log ("ERROR: " .. err) end
+   else
       _log "no init data"
     end
   else
@@ -253,26 +251,30 @@ do -- log rotate and possible rename
 end
   
 do -- ensure some extra folders exist
-   -- note that the ownership/permissions may be system depending on how openLuup is started
+   -- note that the ownership/permissions may be 'system', depending on how openLuup is started
   lfs.mkdir "events"
+  lfs.mkdir "history"
   lfs.mkdir "images"
-  lfs.mkdir "trash"
   lfs.mkdir "mail"
+  lfs.mkdir "trash"
   lfs.mkdir "www"
 end
 
 do -- TODO: tidy up obsolete files
---  os.remove "openLuup/server.lua"
 --  os.remove "openLuup/rooms.lua"
 --  os.remove "openLuup/hag.lua"
+--  os.remove "openLuup/http.lua"
 end
 
 local status
 
-do -- SERVERs and SCHEDULER
-  local s = http.start (config.HTTP)       -- start the port 3480 Web server
+do --	 SERVERs and SCHEDULER
+  local port = tonumber(arg[2]) or config.HTTP.Port or 3480     -- port 3480 is default
+  config.HTTP.Port = port
+  local s = server.start (config.HTTP)      -- start the Web server
+  client.start (config.HTTP)                -- and tell the client which ACTUAL port to use!
   if not s then 
-    error "openLuup - is another copy already running?  Unable to start HTTP port 3480 server" 
+    error ("openLuup - is another copy already running?  Unable to start HTTP server on port " .. port)
   end
 
   if config.SMTP then smtp.start (config.SMTP) end
