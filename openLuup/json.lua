@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "openLuup.json",
-  VERSION       = "2020.04.12  --- EXPERIMENTAL ---",
+  VERSION       = "2020.04.13  --- EXPERIMENTAL ---",
   DESCRIPTION   = "JSON encode/decode with unicode escapes to UTF-8 encoding and pretty-printing",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2020 AKBooer",
@@ -336,11 +336,18 @@ local ABOUT = {
 
   end  -- decode ()
 
+  local function decode_wrapper (json)
+    if is_cj then                          -- 2020.04.12  use cjson module, if available
+      local ok, lua = pcall (cjson.decode, json)
+      if ok then return lua end
+    end
+    return decode (json)
+  end
 
 return {
     ABOUT = ABOUT,
     
-    decode  = is_cj and cjson.decode or decode,   -- 2020.04.12  use cjson module, if available
+    decode  = decode_wrapper,
     
     default = default,
     encode  = encode, 
