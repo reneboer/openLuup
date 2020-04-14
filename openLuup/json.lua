@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "openLuup.json",
-  VERSION       = "2020.04.13  --- EXPERIMENTAL ---",
+  VERSION       = "2020.04.14",
   DESCRIPTION   = "JSON encode/decode with unicode escapes to UTF-8 encoding and pretty-printing",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2020 AKBooer",
@@ -34,6 +34,7 @@ local ABOUT = {
 -- 2018.06.26   extend default max_array_length to 3000
 
 -- 2020.04.12   streamline encode() and decode(), use cjson.decode() if installed (10x faster!)
+
 
   local is_cj, cjson = pcall (require, "cjson")
   
@@ -86,12 +87,12 @@ local ABOUT = {
       return replace [old] or ("\\u%04x"): format (old: byte () ) 
     end
     
-    local str_hit = {}
-    local str_cache  = {}                         -- cache storage for encoded strings
     local ctrl_chars = "%z\001-\031"              -- whole range of control characters
 --    local old = '[' .. '"' .. '/' .. '\\' .. ctrl_chars .. ']'
     local old = table.concat {'[', '"', '\\', ctrl_chars, ']'}      -- 2016.06.19
         
+--    local str_hit = {}                            -- log of cache hits
+    local str_cache = {}                          -- cache storage for encoded strings
     local function string (x)
 --      str_hit[x] = (str_hit[x] or 0) + 1          -- count cache hits
       str_cache[x] = str_cache[x] or                -- use cached result if available
@@ -319,7 +320,7 @@ local ABOUT = {
     end
 
     local function parse_json ()
-      if type (json) ~= "string" then json = type(json); error ("JSON input parameter is not a string", 2) end
+      if type (json) ~= "string" then json = type(json); error ("JSON input parameter is not a string", 0) end
       local warning
       local result = value ()        -- start at first character
       find (trailing_spaces) 
@@ -337,14 +338,17 @@ local ABOUT = {
   end  -- decode ()
 
   local function decode_wrapper (json)
+    local ok, msg, try1, try2
     if is_cj then                          -- 2020.04.12  use cjson module, if available
-      local ok, lua = pcall (cjson.decode, json)
-      if ok then return lua end
+      ok, try1 = pcall (cjson.decode, json)
+      if ok then return try1 end
     end
-    return decode (json)
+    try2, msg = decode (json)
+    return try2, msg or try1      -- use our message or the one from cjson error
   end
 
 return {
+  
     ABOUT = ABOUT,
     
     decode  = decode_wrapper,
@@ -352,4 +356,9 @@ return {
     default = default,
     encode  = encode, 
     null    = json_null,
+    
+    Lua = {encode = encode, decode = decode},   -- direct access to Lua implementation
+    
+    C = is_cj and cjson or nil,                 -- direct access to C implementation
+    
   }
