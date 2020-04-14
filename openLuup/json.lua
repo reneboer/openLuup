@@ -34,6 +34,7 @@ local ABOUT = {
 -- 2018.06.26   extend default max_array_length to 3000
 
 -- 2020.04.12   streamline encode() and decode(), use cjson.decode() if installed (10x faster!)
+-- 2020.04.14   provide access to both Lua and C implementations (if installed)
 
 
   local is_cj, cjson = pcall (require, "cjson")
@@ -54,9 +55,7 @@ local ABOUT = {
     local function p(x) buffer[#buffer+1] = x end   -- add item
     local function q(x) buffer[#buffer]   = x end   -- overwrite last item
         
-    local function json_error (text)    -- raise error
-      error ("JSON encode error : " .. text , 0) 
-    end
+    local function json_error (text)  error ("JSON encode error : " .. text , 0) end
     
     local value               -- forward function reference
     local depth = 1           -- for pretty printing
@@ -203,13 +202,15 @@ local ABOUT = {
     local idx = 1       -- starting character for parser
     
     -- note that inline 'if ... then ... end' calls to this are significantly faster than an 'assert' function call
-    local function json_error (msg)
+    local function json_message (msg)
       local _, lineNo = json: sub(1, idx): gsub ('\n','\n')
-      local message = "JSON decode error @[%d of %d, line: %d] %s\nat: '%s   <<<HERE>>>   %s'"
       local before = json: sub (math.max (1,idx-20), math.max(idx-1,1))
       local after = json:sub (idx, idx+20)   -- : gsub ("%c", ' ')
-      error (message: format (idx, #json, lineNo+1, msg, before, after), 0)
+      local message = "JSON decode error @[%d of %d, line: %d] %s\nat: '%s   <<<HERE>>>   %s'"
+      return message: format (idx, #json, lineNo+1, msg, before, after)
     end
+
+    local function json_error (msg) error (json_message(msg), 0) end
 
     local function find (pattern)
       local _,b, c, d = json: find (pattern, idx)
@@ -325,7 +326,7 @@ local ABOUT = {
       local result = value ()        -- start at first character
       find (trailing_spaces) 
       if idx-1 ~= #json  then 
-        warning = "not all of json string parsed" 
+        warning = json_message "unexpected data after valid JSON string" 
       end
       return warning, result    
     end
