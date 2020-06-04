@@ -1,13 +1,13 @@
 ABOUT = {
   NAME          = "VeraBridge",
-  VERSION       = "2019.12.12",
+  VERSION       = "2020.04.30",
   DESCRIPTION   = "VeraBridge plugin for openLuup",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -113,6 +113,13 @@ ABOUT = {
 -- 2019.12.12   CheckAllEveryNth added for user-selection of periodic status requests for all variables (0 = don't)
 --              see: https://community.getvera.com/t/reactor-on-altui-openluup-variable-updates-condition/211412/24
 
+-- 2020.01.21   Add POLL_ERRORS and POLL_TIMEOUTS globals to diagnose asynch callback failures
+-- 2020.02.05   Put missing devices into Room 101 (retaining them in scene triggers and actions)  (for @DesT)
+-- 2020.02.12   use existing Bridge offset, if defined (thanks @reneboer.)  New luup.openLuup.bridge.*()
+-- 2020.03.14   add 'host' attribute to all children to show that they come from a Vera
+-- 2020.04.17   fix rogue references to /port_3480, use RemotePort instead, thanks @propHAed
+-- 2020.04.30   implement @propHAed's fix for remote action problems (restore 'X' implementation file)
+
 
 local devNo                      -- our device number
 
@@ -131,6 +138,9 @@ POLL_DELAY = 5              -- number of seconds between remote polls
 POLL_MINIMUM = 0.5          -- minimum delay (s) for async polling
 POLL_MAXIMUM = 30           -- maximum delay (s) ditto
 
+POLL_ERRORS = 0
+POLL_TIMEOUTS = 0
+
 local local_room_index           -- bi-directional index of our rooms
 local remote_room_index          -- bi-directional of remote rooms
 
@@ -138,12 +148,15 @@ local BuildVersion                -- ...of remote machine
 local PK_AccessPoint              -- ... ditto
 local LoadTime                    -- ... ditto
 
-local RemotePort                  -- port to access remote machine ("/port_3480" for Vera, ":3480" for openLuup)
+local RemotePort                  -- port to access remote machine 
+                                  -- "/port_3480" for newer Veras, ":3480" for older ones, and openLuup
+
 local AsyncPoll, AsyncTimeout     -- asynchronous polling
 local CheckAllEveryNth            -- periodic status request for all variables
 
 local SID = {
   altui    = "urn:upnp-org:serviceId:altui1"  ,         -- Variables = 'DisplayLine1' and 'DisplayLine2'
+  bridge   = luup.openLuup.bridge.SID,                  -- for Remote_ID variable
   gateway  = "urn:akbooer-com:serviceId:VeraBridge1",
   hag      = "urn:micasaverde-com:serviceId:HomeAutomationGateway1",
 }
@@ -213,7 +226,7 @@ local function convert_to_set (s)
   return set
 end
 
--- remote request to port_3480
+-- remote request to port 3480
 local function remote_request (request)    -- 2018.01.11
   return luup.inet.wget (table.concat {"http://", ip, RemotePort, request})
 end
@@ -236,7 +249,7 @@ end
 -- mapping between remote and local device IDs
 
 local OFFSET                      -- offset to base of new device numbering scheme
-local BLOCKSIZE = 10000           -- size of each block of device and scene IDs allocated
+local BLOCKSIZE = luup.openLuup.bridge.BLOCKSIZE  -- size of each block of device and scene IDs allocated
 local Zwave = {}                  -- list of Zwave Controller IDs to map without device number translation
 
 local function local_by_remote_id (id) 
@@ -249,14 +262,11 @@ local function remote_by_local_id (id)
 end
 
 -- change parent of given device, and ensure that it handles child actions
-local function set_parent (devNo, newParent)
+local function set_parent_and_handle_children (devNo, newParent)
   local dev = luup.devices[devNo]
   if dev then
-    local meta = getmetatable(dev).__index
-    luup.log ("device[" .. devNo .. "] parent set to " .. newParent)
-    meta.handle_children = true                   -- handle Zwave actions
-    dev.device_num_parent = newParent             -- parent resides in two places under different names !!
-    dev.attributes.id_parent = newParent
+    dev.handle_children = true              -- handle Zwave actions
+    dev:set_parent (newParent)              -- parent resides in two places under different names !!
   end
 end
  
@@ -283,27 +293,6 @@ local function index_remote_rooms (rooms)    --<-- different structure
   return room_index
 end
 
--- make a list of our existing children, counting grand-children, etc.!!!
-local function existing_children (parent)
-  local c = {}
-  local function children_of (d,index)
-    for _, child in ipairs (index[d] or {}) do
-      c[child] = luup.devices[child]
-      children_of (child, index)
-    end
-  end
-  
-  local idx = {}
-  for child, dev in pairs (luup.devices) do
-    local num = dev.device_num_parent
-    local children = idx[num] or {}
-    children[#children+1] = child
-    idx[num] = children
-  end
-  children_of (parent, idx)
-  return c
-end
-
 -- create a new device, cloning the remote one
 local function create_new (cloneId, dev, room)
 --[[
@@ -321,8 +310,11 @@ local function create_new (cloneId, dev, room)
     json_file       = dev.device_json,
     description     = dev.name,
     upnp_file       = dev.device_file,
---    upnp_impl       = 'X',              -- override device file's implementation definition... musn't run here!
-    upnp_impl       = dev.impl_file,
+--
+-- 2020.04.30
+    upnp_impl       = 'X',              -- override device file's implementation definition... musn't run here!
+--    upnp_impl       = dev.impl_file,
+--
     parent          = devNo,
     password        = dev.password,
     room            = room, 
@@ -338,6 +330,7 @@ local function create_new (cloneId, dev, room)
   for _,name in ipairs (extras) do 
     attr[name] = dev[name]
   end
+  attr.host = "Vera"    -- 2020.03.14  show that we come from a Vera
   
   luup.devices[cloneId] = d   -- remember to put into the devices table! (chdev.create doesn't do that)
 end
@@ -351,10 +344,9 @@ local function build_families (devices)
     local clone  = luup.devices[cloneId]
     local parent = luup.devices[parentId]
     if clone and parent then
-      set_parent (cloneId, parentId)
+      set_parent_and_handle_children (cloneId, parentId)
     end
   end
---  existing_children (devNo)     -- TODO: TESTING ONLY 
 end
 
 -- return true if device is to be cloned
@@ -383,7 +375,7 @@ local function create_children (devices, room_0)
   local N = 0
   local list = {}           -- list of created or deleted devices (for logging)
   local something_changed = false
-  local current = existing_children (devNo)
+  local current = luup.openLuup.bridge.all_descendants (devNo)
   for _, dev in ipairs (devices) do   -- this 'devices' table is from the 'user_data' request
     dev.id = tonumber(dev.id)
     if is_to_be_cloned (dev) then
@@ -411,9 +403,16 @@ local function create_children (devices, room_0)
   
   list = {}
   for n in pairs (current) do
-    luup.devices[n] = nil       -- remove entirely!
-    something_changed = true
-    list[#list+1] = n
+--    luup.devices[n] = nil       -- remove entirely!
+--    something_changed = true
+--    list[#list+1] = n
+-- 2020.02.05, put into Room 101, instead of deleting, in order to retain information in scene triggers and actions
+    if not luup.rooms[101] then luup.rooms.create ("Room 101", 101) end 
+    local dev = luup.devices[n]
+    dev: rename (nil, 101)            -- move to Room 101
+    dev: attr_set ("disabled", 1)     -- and make sure it doesn't run (shouldn't anyway, because it is a child device)
+--
+--
   end
   if #list > 0 then luup.log ("deleting device numbers: " .. json.encode(list)) end
   
@@ -445,7 +444,7 @@ local function create_scenes (remote_scenes, room)
   luup.log "linking to remote scenes..."
   
   local action = "RunScene"
-  local wget = 'luup.inet.wget "http://%s/port_3480/data_request?id=action&serviceId=%s&action=%s&SceneNum=%d"' 
+  local wget = 'luup.inet.wget "http://%s%s/data_request?id=action&serviceId=%s&action=%s&SceneNum=%d"' 
   
   for _, s in pairs (remote_scenes) do
     local id = s.id + OFFSET             -- retain old number, but just offset it
@@ -457,7 +456,7 @@ local function create_scenes (remote_scenes, room)
           id = id,
           name = s.name,
           room = room,
-          lua = wget:format (ip, SID.hag, action, s.id)   -- trigger the remote scene
+          lua = wget:format (ip, RemotePort, SID.hag, action, s.id)   -- trigger the remote scene
           }
         luup.scenes[new.id] = scenes.create (new)
         luup.log (("scene [%d] %s"): format (new.id, new.name))
@@ -645,6 +644,7 @@ do
   
     if not ok then -- we will never be called again, unless we do something about it
       luup.log (erm: format (tostring(err)))                              -- report error...
+      POLL_ERRORS = POLL_ERRORS + 1
       luup.call_delay ("VeraBridge_async_request", POLL_DELAY, "INIT")    -- ...and reschedule ourselves to try again
     end
   end
@@ -665,28 +665,12 @@ do
 
   function VeraBridge_async_watchdog (timeout)
     if (last_async_call + timeout) < os.time() then
+      POLL_TIMEOUTS = POLL_TIMEOUTS + 1
       VeraBridge_async_request ()                     -- throw in another call, just in case we missed one
     end
     luup.call_delay ("VeraBridge_async_watchdog", timeout, timeout)
   end
 
-end
-
--- find other bridges in order to establish base device number for cloned devices
-local function findOffset ()
-  local offset
-  local my_type = luup.devices[devNo].device_type
-  local bridges = {}      -- devNos of ALL bridges
-  for d, dev in pairs (luup.devices) do
-    if dev.device_type == my_type then
-      bridges[#bridges + 1] = d
-    end
-  end
-  table.sort (bridges)      -- sort into ascending order by deviceNo
-  for d, n in ipairs (bridges) do
-    if n == devNo then offset = d end
-  end
-  return offset * BLOCKSIZE   -- every remote machine starts in a new block of devices
 end
 
 -- logged request
@@ -741,12 +725,14 @@ function GetVeraFiles (params)
 
   local function get_files_from (path, filename, dest, url_prefix)
     dest = dest or '.'
-    url_prefix = url_prefix or "/port_3480/"
+    url_prefix = url_prefix or ''
     luup.log ("getting files from " .. path)
     local info = get_directory (path, filename)
+    local wget = "http://%s%s/%s%s" 
     for x in info: gmatch "%C+" do
       local fname = x:gsub ("%.lzo",'')   -- remove unwanted extension for compressed files
-      local status, content = luup.inet.wget ("http://" .. ip .. url_prefix .. fname)
+--      local status, content = luup.inet.wget ("http://" .. ip .. url_prefix .. fname)
+      local status, content = luup.inet.wget (wget: format (ip, RemotePort, url_prefix, fname))
       if status == 0 then
         luup.log (table.concat {#content, ' ', fname})
         
@@ -763,8 +749,8 @@ function GetVeraFiles (params)
   lfs.mkdir "files"
   local pattern = params.Files or '*'   -- 2018.07.04
   pattern = pattern: gsub ('*', ".*")   -- convert wildcard to Lua search pattern
-  get_files_from ("/etc/cmh-ludl/", pattern, "files", "/port_3480/")
-  get_files_from ("/etc/cmh-lu/", pattern, "files", "/port_3480/")
+  get_files_from ("/etc/cmh-ludl/", pattern, "files")
+  get_files_from ("/etc/cmh-lu/", pattern, "files")
   luup.log "...end of device files"
   
   -- icons
@@ -780,9 +766,9 @@ function GetVeraFiles (params)
  
   if major then  
     if major > 5 then     -- UI7
-      get_files_from (icon_directories[7], pattern, "icons", "/cmh/skins/default/img/devices/device_states/")
+      get_files_from (icon_directories[7], pattern, "icons", "cmh/skins/default/img/devices/device_states/")
     else                  -- UI5
-      get_files_from (icon_directories[5], pattern, "icons", "/cmh/skins/default/icons/")
+      get_files_from (icon_directories[5], pattern, "icons", "cmh/skins/default/icons/")
     end
     luup.log "...end of icon files"  
   end
@@ -978,7 +964,12 @@ function init (lul_device)
   ip = luup.attr_get ("ip", devNo)
   luup.log (ip)
   
-  OFFSET = findOffset ()
+  -------
+  -- 2020.02.12 use existing Bridge offset, if defined.
+  -- this way, it doesn't matter if other bridges get deleted, we keep the same value
+  -- see: https://community.getvera.com/t/openluup-suggestions/189405/199
+  
+  OFFSET = tonumber (getVar "Offset") or luup.openLuup.bridge.nextIdBlock()
   setVar ("Offset", OFFSET)                     -- 2018.06.04  Expose OFFSET as device variable
   luup.log ("device clone numbering starts at " .. OFFSET)
 
@@ -1009,9 +1000,8 @@ function init (lul_device)
   
   -- map remote Zwave controller device if we are the primary VeraBridge 
   if OFFSET == BLOCKSIZE then 
-    Zwave = {1}                   -- device IDs for mapping (same value on local and remote)
-    set_parent (1, devNo)         -- ensure Zwave controller is an existing child 
-
+    Zwave = {1}                                 -- device IDs for mapping (same value on local and remote)
+    set_parent_and_handle_children (1, devNo)   -- ensure Zwave controller is an existing child 
     luup.log "VeraBridge maps remote Zwave controller"
   end
 
@@ -1029,9 +1019,10 @@ function init (lul_device)
   
   local status = true
   local status_msg = "OK"
-  if PK_AccessPoint then                          -- 2018.07.29   only start up when valid PK_AccessPoint
-    setVar ("PK_AccessPoint", PK_AccessPoint)     -- 2018.06.04   Expose PK_AccessPoint as device variable
-    setVar ("LoadTime", LoadTime or 0)            -- 2019.03.18
+  if PK_AccessPoint then                              -- 2018.07.29   only start up when valid PK_AccessPoint
+    setVar ("PK_AccessPoint", PK_AccessPoint)         -- 2018.06.04   Expose PK_AccessPoint as device variable
+    setVar ("Remote_ID", PK_AccessPoint, SID.bridge)  -- 2020.02.12   duplicate above as unique remote ID
+    setVar ("LoadTime", LoadTime or 0)                -- 2019.03.18
     
     setVar ("DisplayLine1", Ndev.." devices, " .. Nscn .. " scenes", SID.altui)
     setVar ("DisplayLine2", ip, SID.altui)        -- 2018.03.02

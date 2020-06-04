@@ -1,12 +1,12 @@
 local ABOUT = {
   NAME          = "openLuup.virtualfilesystem",
-  VERSION       = "2019.11.21",
+  VERSION       = "2020.05.12",
   DESCRIPTION   = "Virtual storage for Device, Implementation, Service XML and JSON files, and more",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   LICENSE       = [[
-  Copyright 2019 AK Booer
+  Copyright 2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -39,8 +39,11 @@ local xml   = require "openLuup.xml"              -- for XML device file encodin
 --
 
 local SID = {
-    AltUI = "urn:upnp-org:serviceId:altui1",
-    VeraBridge = "urn:akbooer-com:serviceId:VeraBridge1",
+    AltUI           = "urn:upnp-org:serviceId:altui1",
+    VeraBridge      = "urn:akbooer-com:serviceId:VeraBridge1",
+    ZwaveNetwork    = "urn:micasaverde-com:serviceId:ZWaveNetwork1",
+    ZWay            = "urn:akbooer-com:serviceId:ZWay1",
+    openLuupBridge  = "urn:akbooer-com:serviceId:openLuupBridge1",
   }
 
 
@@ -152,33 +155,63 @@ local D_openLuup_json = json.encode {
         Label ("console", '<a href="openLuup" target="_blank">CONSOLE interface</a>')),
       ControlGroup (2, "label", 0,4,
         Display (50,200, 75,20),
+        Label ("forum", '<a href="https://smarthome.community" target="_blank">' ..
+                "smarthome.community - an independent place for smart home users to share experience</a>")),
+      ControlGroup (2, "label", 0,4,
+        Display (50,240, 75,20),
         Label ("donate", '<a href="https://www.justgiving.com/DataYours/" target="_blank">' ..
                 "If you like openLuup, you could DONATE to Cancer Research UK right here</a>")),
    }}},
   eventList2 = {
-    {id = 1, serviceId = "openLuup",argumentList = {},
-      label = Label ("triggers_are_not_implemented", "Triggers not implemented, use Watch instead")},
+--    {id = 1, serviceId = "openLuup",argumentList = {},
+--      label = Label ("triggers_are_not_implemented", "Triggers not implemented, use Watch instead")},
+    {id = 1, serviceId = "openLuup",
+      label = Label ("hft_dvw", "Variable Watch"),
+      argumentList = {
+              {
+                  id = 1,
+                  name = "Device",
+                  comparisson = "=",
+              },
+              {
+                  id = 2,
+                  name = "Service",
+                  defaultValue = "blank: serviceId only required to disambiguate non-unique variable names",
+                  comparisson = "=",
+              },
+              {
+                  id = 3,
+                  name = "Variable",
+                  comparisson = "=",
+              },
+          },
+      },
+    
     }
   }
 
 local I_openLuup_impl do
   local x = xml.createDocument ()
-  local function action (S,N, R,J)
-    return x.action {x.serviceId (S), x.name (N), x.run(R), x.job (J)}
+  local function run_action (S,N, R)
+    return x.action {x.serviceId (S), x.name (N),x.run(R)}
+  end
+  local function job_action (S,N, J)
+    return x.action {x.serviceId (S), x.name (N), x.job (J)}
   end
     x: appendChild {
       x.implementation {
         x.files   "openLuup/L_openLuup.lua",
         x.startup "init",
         x.actionList {
-          action ("openLuup", "SendToTrash", nil, "SendToTrash (lul_settings)"),
-          action ("openLuup", "EmptyTrash",  nil, "EmptyTrash (lul_settings)"),
-          action ("openLuup", "SetHouseMode",
+          job_action ("openLuup", "SendToTrash",  "SendToTrash (lul_settings)"),
+          job_action ("openLuup", "EmptyTrash",   "EmptyTrash (lul_settings)"),
+          run_action ("openLuup", "EmptyRoom101", "EmptyRoom101 (lul_settings)"),
+          run_action ("openLuup", "SetHouseMode",
             [[
               local sid = "urn:micasaverde-com:serviceId:HomeAutomationGateway1"
               luup.call_action (sid, "SetHouseMode", lul_settings)
             ]]),
-          action ("openLuup", "RunScene",                  -- added by @rafale77 --
+          run_action ("openLuup", "RunScene",                  -- added by @rafale77 --
             [[
               local sid = "urn:micasaverde-com:serviceId:HomeAutomationGateway1"
               luup.call_action(sid, "RunScene", {SceneNum = lul_settings.SceneNum}, 0)
@@ -211,6 +244,10 @@ local S_openLuup_svc do
               argument "FileTypes"}},
         
           x.action {x.name "EmptyTrash",
+            x.argumentList {
+              argument "AreYouSure"}},
+        
+          x.action {x.name "EmptyRoom101",
             x.argumentList {
               argument "AreYouSure"}},
             
@@ -486,18 +523,18 @@ local D_VeraBridge_json = json.encode {
 
 local I_VeraBridge_impl do
   local x = xml.createDocument ()
-  local function action (S,N, R,J)
-    return x.action {x.serviceId (S), x.name (N), x.run(R), x.job (J)}
+  local function job_action (S,N, J)
+    return x.action {x.serviceId (S), x.name (N), x.job (J)}
   end
     x: appendChild {
       x.implementation {
         x.files   "openLuup/L_VeraBridge.lua",
         x.startup "init",
         x.actionList {
-          action (SID.VeraBridge, "GetVeraFiles",      nil, "GetVeraFiles (lul_settings)"),
-          action (SID.VeraBridge, "GetVeraScenes",     nil, "GetVeraScenes (lul_settings)"),
-          action (SID.VeraBridge, "RemoteVariableSet", nil, "RemoteVariableSet (lul_settings)"),
-          action (SID.VeraBridge, "SetHouseMode",      nil, "SetHouseMode (lul_settings)"),
+          job_action (SID.VeraBridge, "GetVeraFiles",      "GetVeraFiles (lul_settings)"),
+          job_action (SID.VeraBridge, "GetVeraScenes",     "GetVeraScenes (lul_settings)"),
+          job_action (SID.VeraBridge, "RemoteVariableSet", "RemoteVariableSet (lul_settings)"),
+          job_action (SID.VeraBridge, "SetHouseMode",      "SetHouseMode (lul_settings)"),
         }}}
   I_VeraBridge_impl = tostring(x)
 end
@@ -536,6 +573,108 @@ local S_VeraBridge_svc do
             x.argumentList {argument "Mode"}}}}}
   S_VeraBridge_svc = tostring (x)  
 end
+
+-----
+--
+-- Z-Way support
+--
+
+local D_ZWay_xml = Device {
+        deviceType   = "ZWay",
+        Category_Num = "1",
+        friendlyName = "ZWay Bridge",
+        manufacturer = "akbooer",
+        staticJson   = "D_ZWay.json",
+        serviceList     = { 
+          {"urn:akbooer-com:service:openLuupBridge:1", SID.openLuupBridge, "S_openLuupBridge.xml"},
+          {"urn:akbooer-com:service:ZWay:1", SID.ZWay, "S_ZWay.xml"},
+          {"urn:schemas-micasaverde-org:service:ZWaveNetwork:1", SID.ZwaveNetwork, "S_ZWaveNetwork1.xml"} },
+        implementationList = {"I_ZWay2.xml"}}
+
+
+local D_ZWay_json = json.encode {
+  default_icon = "http://raw.githubusercontent.com/akbooer/Z-Way/master/icons/Z-Wave.me.png",
+  DeviceType = "ZWay",
+  Tabs = {{
+      Label = Label ("tabname_control", "Control"),
+			Position = "0",
+			TabType = "flash",
+			ControlGroup = { {id = "1",scenegroup = "1"} },
+			SceneGroup = { {id = "1", top = "1.5", left = "0.25", x = "1.5",y ="2"} },
+    
+    Control = {
+      ControlGroup (1, "variable", 0,0,
+        Display (50,40, 75,20, SID.AltUI, "DisplayLine1")),
+      ControlGroup (1, "variable", 0,1,
+        Display (50,60, 75,20, SID.AltUI, "DisplayLine2")),
+      ControlGroup (2, "variable", 0,3,
+        Display (50,100, 75,20, SID.ZWay,"Version")),
+      ControlGroup (2, "label", 0,4, 
+        Display (50,160, 75,20),
+        Label ("configure", '<a href="/cgi/zway_cgi.lua" target="_blank">Configure ZWay child devices</a>')),
+      }}}}
+
+
+local I_ZWay_xml = [[
+<?xml version="1.0"?>
+<implementation>
+  <handleChildren>1</handleChildren>
+  <functions>
+    local M = require "L_ZWay"
+    ABOUT = M.ABOUT   -- make this global (for InstalledPlugins version update)
+    function startup (...)
+      return M.init (...)
+    end
+  </functions>
+  <startup>startup</startup>
+</implementation>
+]]
+
+local I_ZWay2_xml do
+  local x = xml.createDocument ()
+  local function action (S,N, JorR)
+    return x.action {x.serviceId (S), x.name (N), JorR}
+  end
+    x: appendChild {
+      x.implementation {
+        x.handleChildren {1},
+        x.functions [[
+          local M = require "L_ZWay2"
+          ABOUT = M.ABOUT   -- make this global (for InstalledPlugins version update)
+          Login = M.Login
+          SendData = M.SendData
+          function startup (...)
+            return M.init (...)
+          end
+        ]],
+        x.startup "startup",
+        x.actionList {
+          action (SID.ZWay,         "Login",      x.job "Login (lul_settings)"),
+          action (SID.ZwaveNetwork, "SendData",   x.job "SendData (lul_settings)"),
+        }}}
+  I_ZWay2_xml = tostring(x)
+end
+
+
+
+local S_ZWay_svc do
+  local x = xml.createDocument ()
+  local function argument (N,D)
+    return x.argument {x.name (N), x.direction (D or "in")}
+  end
+    x: appendChild {
+      x.scpd {xmlns="urn:schemas-upnp-org:service-1-0",
+        x.specVersion {x.major "1", x.minor "0"},
+        x.actionList {
+          x.action {x.name "Login",
+            x.argumentList {
+              argument "Username",
+              argument "Password"}},
+         }}}
+  S_ZWay_svc = tostring(x)
+end
+
+
 
 -----
 
@@ -728,149 +867,6 @@ GOTO loop
 ]]
 
 
------
---
--- Z-Way support
---
-local D_ZWay_xml = [[
-<?xml version="1.0"?>
-<root xmlns="urn:schemas-upnp-org:device-1-0">
-  <specVersion>
-    <major>1</major>
-    <minor>0</minor>
-  </specVersion>
-  <device>
-    <deviceType>urn:akbooer-com:device:ZWay:1</deviceType>
-    <friendlyName>ZWay Network Interface</friendlyName>
-    <manufacturer>akbooer</manufacturer>
-    <manufacturerURL></manufacturerURL>
-    <modelDescription>ZWay Network</modelDescription>
-    <modelName></modelName>
-    <modelNumber></modelNumber>
-    <serviceList>
-      <service>
-        <serviceType>urn:schemas-micasaverde-org:service:ZWaveNetwork:1</serviceType>
-        <serviceId>urn:micasaverde-com:serviceId:ZWaveNetwork1</serviceId>
-        <controlURL>/upnp/control/ZWaveNetwork1</controlURL>
-        <eventSubURL>/upnp/event/ZWaveNetwork1</eventSubURL>
-        <SCPDURL>S_ZWaveNetwork1.xml</SCPDURL>
-      </service>
-    </serviceList>
-    <implementationList>
-      <implementationFile>I_ZWay.xml</implementationFile>
-    </implementationList>
-		<staticJson>D_ZWay.json</staticJson>
-  </device>
-</root>
-]]
-
-
-local D_ZWay_json = [[
-{
-  "default_icon": "http://raw.githubusercontent.com/akbooer/Z-Way/master/icons/Z-Wave.me.png",
-	"Tabs": [
-		{
-			"Label": {
-				"lang_tag": "tabname_control",
-				"text": "Control"
-			},
-			"Position": "0",
-			"TabType": "flash",
-			"ControlGroup":[
-				{
-					"id": "1",
-					"scenegroup": "1"
-				}
-			],
-			"SceneGroup":[
-				{
-					"id": "1",
-					"top": "1.5",
-					"left": "0.25",
-					"x": "1.5",
-					"y": "2"
-				}
-			],
-			"Control": [
-				{
-					"ControlGroup":"1",
-					"ControlType": "variable",
-					"top": "0",
-					"left": "0",
-					"Display": {
-						"Service": "urn:upnp-org:serviceId:altui1",
-						"Variable": "DisplayLine1",
-						"Top": 40,
-						"Left": 50,
-						"Width": 75,
-						"Height": 20
-					}
-				},
-				{
-					"ControlGroup":"1",
-					"ControlType": "variable",
-					"top": "1",
-					"left": "0",
-					"Display": {
-						"Service": "urn:upnp-org:serviceId:altui1",
-						"Variable": "DisplayLine2",
-						"Top": 60,
-						"Left": 50,
-						"Width": 75,
-						"Height": 20
-					}
-				},
-				{
-					"ControlGroup":"2",
-					"ControlType": "variable",
-					"top": "3",
-					"left": "0",
-					"Display": {
-						"Service": "urn:akbooer-com:serviceId:ZWay1",
-						"Variable": "Version",
-						"Top": 100,
-						"Left": 50,
-						"Width": 75,
-						"Height": 20
-					}
-				}
-			]
-		}
-  ],
-  "DeviceType": "urn:akbooer-com:device:ZWay:1"
-}
-]]
-
-local I_ZWay_xml = [[
-<?xml version="1.0"?>
-<implementation>
-  <functions>
-    local M = require "L_ZWay"
-    ABOUT = M.ABOUT   -- make this global (for InstalledPlugins version update)
-    function startup (...)
-      return M.init (...)
-    end
-  </functions>
-  <startup>startup</startup>
-</implementation>
-]]
-
--- testing new ZWay implementation
-local I_ZWay2_xml = [[
-<?xml version="1.0"?>
-<implementation>
-  <handleChildren>1</handleChildren>
-  <functions>
-    local M = require "L_ZWay2"
-    ABOUT = M.ABOUT   -- make this global (for InstalledPlugins version update)
-    function startup (...)
-      return M.init (...)
-    end
-  </functions>
-  <startup>startup</startup>
-</implementation>
-]]
-
 -- Camera with child Motion Detector triggered by email
 local I_openLuupCamera1_xml = [[
 <?xml version="1.0"?>
@@ -926,6 +922,19 @@ local I_openLuupCamera1_xml = [[
       if ip then
         smtp.register_handler (openLuupCamera, ip)     -- receive mail from camera IP
       end
+      local function ensure (name, sid)
+        if not sid then
+          if not luup.attr_get (name, devNo) then luup.attr_set (name, '', devNo) end
+        else
+          if not luup.variable_get (sid, name, devNo) then luup.variable_set (sid, name, '', devNo) end
+        end
+      end
+      ensure "username"
+      ensure "password"
+      local Csid = "urn:micasaverde-com:serviceId:Camera1"
+      ensure ("URL", Csid)
+      ensure ("DirectStreamingURL", Csid)
+      luup.attr_set ("category_num", 6, devNo)
       return true, "OK", "I_openLuupCamera1"
     end
   </functions>
@@ -1144,32 +1153,7 @@ local unknown_wsp = [[
           0,                      0
 ]]
 
--- console menu structure
-local classic_console_menus_json = [==[
-{
-  "comment":"JSON to define CLASSIC console menu structure",
-  "menus":[
-    ["openLuup",  ["About", "hr", "Parameters", "Historian", "hr", "Globals", "States"] ],
-    ["Files",     ["Backups", "Images", "Database", "File Cache", "Trash"] ],
-    ["Scheduler", ["Running", "Delays", "Watches", "Sockets", "Sandboxes", "Plugins"] ],
-    ["Servers",   ["HTTP", "SMTP", "POP3", "UDP"] ],
-    ["Logs",      ["Log", "hr", "Log.1","Log.2", "Log.3", "Log.4", "Log.5", "hr", "Startup Log"] ]
-  ]
-}
-]==]
-
-local default_console_menus_json = [==[
-{
-  "comment":"JSON to define standard console menu structure",
-  "menus":[
-    ["openLuup",  ["About", "hr", "System", "Historian", "Lua Code", "hr", "Utilities", "Scheduler","Servers"] ],
-    ["Files",     ["Backups", "Images", "Trash"] ],
-    ["Scheduler", ["Running", "Completed", "Startup", "Plugins", "Delays", "Watches"] ],
-    ["Servers",   ["HTTP", "SMTP", "POP3", "UDP", "hr", "Sockets", "File Cache"] ],
-    ["Logs",      ["Log", "hr", "Log.1","Log.2", "Log.3", "Log.4", "Log.5", "hr", "Startup Log"] ]
-  ]
-}
-]==]
+-- openLuup console menu structure
 
 local altui_console_menus_json = [==[
 {
@@ -1180,11 +1164,27 @@ local altui_console_menus_json = [==[
     ["Scenes"],
     ["Tables", ["Rooms Table","Plugins Table", "Devices Table", "Scenes Table", "Triggers Table"] ],
     ["Utilities", ["Reload Luup Engine", "hr", "Lua Startup","Lua Shutdown", "Lua Test", 
-                       "hr", "Backups", "Images", "Trash"] ],
+                       "hr", "App Store", "Backups", "Images", "Trash"] ],
     ["Logs",      ["Log", "hr", "Log.1","Log.2", "Log.3", "Log.4", "Log.5", "hr", "Startup Log"] ]
   ]
 }
 ]==]
+
+
+local openLuup_menus_json = json.encode {
+  comment = "JSON to define AltUI-style console menu structure",
+  menus = {
+    {"openLuup",  {"About", "hr", "System", "Historian", "Scheduler", "Servers"} },
+    {"Devices"},
+    {"Scenes"},
+    {"Tables", {"Rooms Table", "Devices Table", "Scenes Table", "Triggers Table",
+                        "hr","Plugins Table", "App Store", "Luup Files"} },
+    {"Utilities", {"Reload Luup Engine", "hr", "Lua Startup","Lua Shutdown", "Lua Test", "Command Line", 
+                       "hr", "Backups", "Images", "Trash"} },
+    {"Logs",      {"Log", "hr", "Log.1","Log.2", "Log.3", "Log.4", "Log.5", "hr", "Startup Log"} }
+  }
+}
+
 
 
 ----- font-awesome
@@ -1234,11 +1234,11 @@ fa["chart-bar-solid"] = [[
 fa["retweet"] = [[
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><path d="M629.657 343.598L528.971 444.284c-9.373 9.372-24.568 9.372-33.941 0L394.343 343.598c-9.373-9.373-9.373-24.569 0-33.941l10.823-10.823c9.562-9.562 25.133-9.34 34.419.492L480 342.118V160H292.451a24.005 24.005 0 0 1-16.971-7.029l-16-16C244.361 121.851 255.069 96 276.451 96H520c13.255 0 24 10.745 24 24v222.118l40.416-42.792c9.285-9.831 24.856-10.054 34.419-.492l10.823 10.823c9.372 9.372 9.372 24.569-.001 33.941zm-265.138 15.431A23.999 23.999 0 0 0 347.548 352H160V169.881l40.416 42.792c9.286 9.831 24.856 10.054 34.419.491l10.822-10.822c9.373-9.373 9.373-24.569 0-33.941L144.971 67.716c-9.373-9.373-24.569-9.373-33.941 0L10.343 168.402c-9.373 9.373-9.373 24.569 0 33.941l10.822 10.822c9.562 9.562 25.133 9.34 34.419-.491L96 169.881V392c0 13.255 10.745 24 24 24h243.549c21.382 0 32.09-25.851 16.971-40.971l-16.001-16z"></path></svg>]]
 
-fa["question-circle-solid"] = [[
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M504 256c0 136.997-111.043 248-248 248S8 392.997 8 256C8 119.083 119.043 8 256 8s248 111.083 248 248zM262.655 90c-54.497 0-89.255 22.957-116.549 63.758-3.536 5.286-2.353 12.415 2.715 16.258l34.699 26.31c5.205 3.947 12.621 3.008 16.665-2.122 17.864-22.658 30.113-35.797 57.303-35.797 20.429 0 45.698 13.148 45.698 32.958 0 14.976-12.363 22.667-32.534 33.976C247.128 238.528 216 254.941 216 296v4c0 6.627 5.373 12 12 12h56c6.627 0 12-5.373 12-12v-1.333c0-28.462 83.186-29.647 83.186-106.667 0-58.002-60.165-102-116.531-102zM256 338c-25.365 0-46 20.635-46 46 0 25.364 20.635 46 46 46s46-20.636 46-46c0-25.365-20.635-46-46-46z"></path></svg>]]
+--fa["question-circle-solid"] = [[
+--<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M504 256c0 136.997-111.043 248-248 248S8 392.997 8 256C8 119.083 119.043 8 256 8s248 111.083 248 248zM262.655 90c-54.497 0-89.255 22.957-116.549 63.758-3.536 5.286-2.353 12.415 2.715 16.258l34.699 26.31c5.205 3.947 12.621 3.008 16.665-2.122 17.864-22.658 30.113-35.797 57.303-35.797 20.429 0 45.698 13.148 45.698 32.958 0 14.976-12.363 22.667-32.534 33.976C247.128 238.528 216 254.941 216 296v4c0 6.627 5.373 12 12 12h56c6.627 0 12-5.373 12-12v-1.333c0-28.462 83.186-29.647 83.186-106.667 0-58.002-60.165-102-116.531-102zM256 338c-25.365 0-46 20.635-46 46 0 25.364 20.635 46 46 46s46-20.636 46-46c0-25.365-20.635-46-46-46z"></path></svg>]]
 
-fa["info-circle-solid"] = [[
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M256 8C119.043 8 8 119.083 8 256c0 136.997 111.043 248 248 248s248-111.003 248-248C504 119.083 392.957 8 256 8zm0 110c23.196 0 42 18.804 42 42s-18.804 42-42 42-42-18.804-42-42 18.804-42 42-42zm56 254c0 6.627-5.373 12-12 12h-88c-6.627 0-12-5.373-12-12v-24c0-6.627 5.373-12 12-12h12v-64h-12c-6.627 0-12-5.373-12-12v-24c0-6.627 5.373-12 12-12h64c6.627 0 12 5.373 12 12v100h12c6.627 0 12 5.373 12 12v24z"></path></svg>]]
+--fa["info-circle-solid"] = [[
+--<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M256 8C119.043 8 8 119.083 8 256c0 136.997 111.043 248 248 248s248-111.003 248-248C504 119.083 392.957 8 256 8zm0 110c23.196 0 42 18.804 42 42s-18.804 42-42 42-42-18.804-42-42 18.804-42 42-42zm56 254c0 6.627-5.373 12-12 12h-88c-6.627 0-12-5.373-12-12v-24c0-6.627 5.373-12 12-12h12v-64h-12c-6.627 0-12-5.373-12-12v-24c0-6.627 5.373-12 12-12h64c6.627 0 12 5.373 12 12v100h12c6.627 0 12 5.373 12 12v24z"></path></svg>]]
 
 fa["power-off-solid"] = [[
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M400 54.1c63 45 104 118.6 104 201.9 0 136.8-110.8 247.7-247.5 248C120 504.3 8.2 393 8 256.4 7.9 173.1 48.9 99.3 111.8 54.2c11.7-8.3 28-4.8 35 7.7L162.6 90c5.9 10.5 3.1 23.8-6.6 31-41.5 30.8-68 79.6-68 134.9-.1 92.3 74.5 168.1 168 168.1 91.6 0 168.6-74.2 168-169.1-.3-51.8-24.7-101.8-68.1-134-9.7-7.2-12.4-20.5-6.5-30.9l15.8-28.1c7-12.4 23.2-16.1 34.8-7.8zM296 264V24c0-13.3-10.7-24-24-24h-32c-13.3 0-24 10.7-24 24v240c0 13.3 10.7 24 24 24h32c13.3 0 24-10.7 24-24z"></path></svg>]]
@@ -1281,20 +1281,20 @@ local manifest = {
     ["I_VeraBridge.xml"]  = I_VeraBridge_impl,
     ["S_VeraBridge.xml"]  = S_VeraBridge_svc,
     
-    ["built-in/default_console_menus.json"] = default_console_menus_json,
-    ["built-in/classic_console_menus.json"] = classic_console_menus_json,
+    ["D_ZWay.xml"]  = D_ZWay_xml,
+    ["D_ZWay.json"] = D_ZWay_json,
+    ["I_ZWay.xml"]  = I_ZWay_xml,
+    ["I_ZWay2.xml"] = I_ZWay2_xml,    -- TODO: remove after development
+    ["S_ZWay.xml"]  = S_ZWay_svc,
+    
     ["built-in/altui_console_menus.json"]   = altui_console_menus_json,
+    ["built-in/openLuup_menus.json"]   = openLuup_menus_json,
     
     ["built-in/D_BinaryLight1.xml"]  = D_BinaryLight1_xml,
     ["built-in/D_BinaryLight1.json"] = D_BinaryLight1_json,
     ["built-in/S_SwitchPower1.xml"]  = S_SwitchPower1_xml,
     ["built-in/D_ZWaveNetwork.xml"]  = D_ZWaveNetwork_xml,
     ["built-in/D_MotionSensor1.xml"] = D_MotionSensor1_xml,
-    
-    ["D_ZWay.xml"]  = D_ZWay_xml,
-    ["D_ZWay.json"] = D_ZWay_json,
-    ["I_ZWay.xml"]  = I_ZWay_xml,
-    ["I_ZWay2.xml"] = I_ZWay2_xml,    -- TODO: remove after development
     
     ["I_openLuupCamera1.xml"]   = I_openLuupCamera1_xml,
     ["I_openLuupSecurity1.xml"] = I_openLuupSecurity1_xml,
@@ -1319,8 +1319,6 @@ do -- add font-awesome icon SVGs
     local new_icon = table.concat {icon, '-', suffix or colour}
     manifest [name: format (new_icon)] = svg: format (colour, fa[icon])
   end
---  for n,v in pairs (fa) do manifest [name: format(n)] = svg: format ("royalblue", v) end
---  for n,v in pairs (fa) do manifest [name: format(n)] = svg: format ("steelblue", v) end
   for n,v in pairs (fa) do manifest [name: format(n)] = svg: format ("cornflowerblue", v) end
   colorize ("trash-alt", "crimson", "red")
   colorize ("car-side-solid", "grey")
@@ -1331,13 +1329,6 @@ do -- add font-awesome icon SVGs
   colorize ("pause-solid", "grey")
   colorize ("circle-regular", "grey")
   colorize ("trigger", "grey")
---  colorize ("play-solid",  "cornflowerblue")
---  colorize ("play-solid",  "cadetblue")
---  colorize ("play-solid",  "darkcyan")
---  colorize ("play-solid",  "peru")
---  colorize ("play-solid",  "firebrick", "red")
---  colorize ("play-solid",  "indianred", "red")
---  colorize ("play-solid",  "lightcoral", "red")
   colorize ("play-solid",  "crimson", "red")
   colorize ("clock", "grey")
 end

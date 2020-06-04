@@ -1,13 +1,13 @@
 local ABOUT = {
   NAME          = "openLuup.luup",
-  VERSION       = "2019.10.19",
+  VERSION       = "2020.03.21",
   DESCRIPTION   = "emulation of luup.xxx(...) calls",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -72,6 +72,11 @@ local ABOUT = {
 -- 2019.07.31  use new client and server modules (http split into two)
 -- 2019.10.19  add luup.modelID
 
+-- 2020.01.27  use object-oriented scene: rename() rather than scene.rename()
+-- 2020.02.14  add room.lookup() to find room by name
+-- 2020.03.14  disable special Tripped processing on Vera bridged devices ONLY (ie. not Z-Way)
+-- 2020.03.21  disable special Tripped processing for ANY security sensor with 'host' attribute
+
 
 local logs          = require "openLuup.logs"
 
@@ -82,7 +87,7 @@ local devutil       = require "openLuup.devices"
 local Device_0      = require "openLuup.gateway"
 local timers        = require "openLuup.timers"
 local userdata      = require "openLuup.userdata"
-local loader        = require "openLuup.loader"     -- simply to access shared environment
+local loader        = require "openLuup.loader"     -- for shared environment and compiler
 local smtp          = require "openLuup.smtp"       -- for register_handler to work with email
 local historian     = require "openLuup.historian"  -- for luup.variable_get() to work with historian
 
@@ -91,16 +96,10 @@ local chdev         = require "openLuup.chdev"
 local ioutil        = require "openLuup.io"    
 
 
---  local _log() and _debug()
-local _log, _debug = logs.register (ABOUT)
+--  local _log() and, optionally, _debug()
+local _log = logs.register (ABOUT)
 
 local _log_altui_variable  = logs.altui_variable
-
------
-
-local BRIDGEBLOCK = 10000         -- hardcoded VeraBridge blocksize (sorry, but easy and quick)
-
------
 
 -- devices contains all the devices in the system as a table indexed by the device number 
 -- not necessarily contiguous!
@@ -170,12 +169,20 @@ do
       end
       -- check scenes for reference to deleted room no.
       for _, s in pairs (scenes) do
-        if s.room_num == number then s.rename (nil, 0) end    -- 2019.05.03  corrected s.room to s.room_num
+        if s.room_num == number then    -- 2019.05.03  corrected s.room to s.room_num
+          s: rename (nil, 0)            -- 2020.01.27
+        end
       end
     devutil.new_userdata_dataversion ()   -- 2018.05.01  we've changed the user_data structure
     end
   end
 
+  function room.lookup (name)             -- 2020.02.14  return room number if named room exists
+    for id, room_name in pairs (rooms) do
+      if name == room_name then return id end
+    end
+  end
+  
   setmetatable (rooms,     -- 2018.03.24  add room functions to luup.rooms metatable
     { __index = room,
       __tostring = function ()    -- so that print (luup.rooms) works
@@ -363,19 +370,19 @@ local function variable_set (service, name, value, device, startup)
     end 
   end
   set (name, value)
-  
+
   -- 2018.06.17  special Tripped processing for security devices, has to be synchronous with variable change
-  
+
   local security  = "urn:micasaverde-com:serviceId:SecuritySensor1"
-  if (name ~= "Tripped") or (service ~= security) or (device >= BRIDGEBLOCK) then return end   -- not interested 
-  
+  if (name ~= "Tripped") or (service ~= security) or dev.attributes.host then return end  -- not interested 
+
   set ("LastTrip", tostring(os.time()))
-  
+
   -- 2018.08.05  AutoUntrip functionality (thanks for the suggestion @rigpapa)
-  
+
   local untrip = dev:variable_get (service, "AutoUntrip") or {}
   untrip = tonumber (untrip.value) or 0
-  
+
   local function clear ()
     local now = os.time()
     local last = dev: variable_get (service, "LastTrip") .value
@@ -1081,6 +1088,7 @@ return {
     
     openLuup = {   -- 2018.06.23, 2018.07.18 was true, now {} ... to indicate not a Vera (for plugin developers)
       -- openLuup-specific API extensions go here...
+      bridge = chdev.bridge, -- 2020.02.12  Bridge utilities 
     },
     
     hw_key              = "--hardware key--",

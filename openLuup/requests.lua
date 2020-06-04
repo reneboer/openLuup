@@ -1,12 +1,12 @@
 local ABOUT = {
   NAME          = "openLuup.requests",
-  VERSION       = "2019.11.29",
+  VERSION       = "2020.04.15",
   DESCRIPTION   = "Luup Requests, as documented at http://wiki.mios.com/index.php/Luup_Requests",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -71,6 +71,11 @@ local ABOUT = {
 -- 2017.07.15  encode action request XML response from scratch, using new XML document constructor
 -- 2019.07.31  use new client and server modules (http split into two)
 -- 2019.11.29  update test request to show client socket id (if present)
+
+-- 2020.01.27  object-oriented scene:rename() rather than scene.rename()
+-- 2020.02.05  object-oriented dev:rename() in device request
+-- 2020.03.08  add new scene creation date
+-- 2020.04.14  modify &id=actions to enumerate ALL actions in the service data (thanks @rigpapa)
 
 
 local client        = require "openLuup.client"
@@ -179,18 +184,7 @@ local function device (_,p)
   local dev = luup.devices[devNo]
 
   local function rename ()
-    if p.name then
-      dev.description = p.name
-      dev.attributes.name = p.name
-    end
-    if p.room then
-      local idx = {}
-      for i,room in pairs(luup.rooms) do
-        idx[room] = i
-      end
-      dev.room_num = tonumber(p.room) or idx[p.room] or 0
-      dev.attributes.room = tostring(dev.room_num)        -- 2018.07.02
-    end
+    if dev then dev: rename (p.name, p.room) end      -- 2020.02.05
   end
   local function delete ()
     local tag = {}                -- list of devices to delete
@@ -285,11 +279,12 @@ local function actions (_, p)
     return "BAD_DEVICE", "text/plain"
   end
   
-  for s, srv in spairs (dev.services) do
+  for _, svc in ipairs (dev.serviceList or {}) do
     local A = {}
+    local s = svc.serviceId
     S[#S+1] = {serviceId = s, actionList = A}
 --      local implemented_actions = srv.actions
-    for _, act in spairs ((loader.service_data[s] or {}).actions or {}) do
+    for _, act in pairs ((loader.service_data[s] or {}).actions or {}) do
       local args = {}
       for i, arg in ipairs (act.argumentList or {}) do
           args[i] = {name = arg.name, dataType = arg.dataType}    -- TODO: dataType not in arg?
@@ -524,7 +519,7 @@ local category_filter = {      -- no idea what this is, but AltUI seems to need 
 local function user_scenes_table()
   local scenes = {}
   for _,sc in pairs (luup.scenes) do
-    scenes[#scenes+1] = sc.user_table()
+    scenes[#scenes+1] = sc.definition
   end
   return scenes
 end
@@ -629,15 +624,14 @@ local function scene (_,p)
   --Example: http://ip_address:3480/data_request?id=scene&action=delete&scene=5
   local function delete (scene) 
     if scene then 
-      scene:stop()                             -- stop scene triggers and timers
-      luup.scenes[scene.user_table().id] = nil -- remove reference to the scene
+      scenes.delete (scene.definition.id) -- remove reference to the scene
     end
   end
   --Example: http://ip_address:3480/data_request?id=scene&action=create&json=[valid json data]
   local function create () 
-    local new_scene, msg = scenes.create (p.json)
+    local new_scene, msg = scenes.create (p.json, os.time())    -- 2020.03.08 add new creation date
     if new_scene then
-      local id = new_scene.user_table().id
+      local id = new_scene.definition.id
       if luup.scenes[id] then
         delete (luup.scenes[id])               -- remove the old scene with this id
       end
@@ -653,14 +647,11 @@ local function scene (_,p)
       for i, name in pairs (luup.rooms) do room_index[name] = i end
       new_room_num = room_index[room]
     end
-    if scene then scene.rename (name, new_room_num) end
+    if scene then scene: rename (name, new_room_num) end    -- 2020.01.27
   end
   --Example: http://ip_address:3480/data_request?id=scene&action=list&scene=5
   local function list (scene)
-    if scene and scene.user_table then
-      return json.encode (scene.user_table()) or "ERROR"
-    end
-    return "ERROR"
+    return scene and tostring (scene) or "ERROR"            -- 2020.01.27
   end
   local function noop () return "ERROR" end
 
@@ -965,7 +956,7 @@ local function lua ()    -- 2018.04.22
 
   -- scenes
   for i,s in pairs (luup.scenes) do
-      local lua = s:user_table().lua
+      local lua = s.definition.lua or ''
       if #lua > 0 then
           pr ("function scene_" .. i .. "()")
           pr (lua)

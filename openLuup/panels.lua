@@ -1,6 +1,6 @@
 local ABOUT = {
   NAME          = "panels.lua",
-  VERSION       = "2019.12.26",
+  VERSION       = "2020.05.12",
   DESCRIPTION   = "built-in console device panel HTML functions",
   AUTHOR        = "@akbooer",
   COPYRIGHT     = "(c) 2013-2019 AKBooer",
@@ -42,6 +42,9 @@ Each function returns HTML - either plain text or openLuup DOM model - which def
 -- 2019.07.14  use new HTML constructor methods
 -- 2019.11.14  move into separate file
 
+-- 2020.05.07  add simple camera control panel showing video stream
+
+
 local xml = require "openLuup.xml"
 
 local h = xml.createHTMLDocument ()    -- for factory methods
@@ -51,6 +54,7 @@ local p = h.p
 local sid = {
     althue    = "urn:upnp-org:serviceId:althue1",
     altui     = "urn:upnp-org:serviceId:altui1",
+    camera    = "urn:micasaverde-com:serviceId:Camera1",
     energy    = "urn:micasaverde-com:serviceId:EnergyMetering1",
     netatmo   = "urn:akbooer-com:serviceId:Netatmo1",
     scene     = "urn:micasaverde-com:serviceId:SceneController1",
@@ -66,13 +70,17 @@ local panels = {
 -- openLuup
 --
   openLuup = {
-    control = function() return 
-      '<div><a class="w3-text-blue", href="https://www.justgiving.com/DataYours/" target="_blank">' ..
-        "If you like openLuup, you could DONATE to Cancer Research UK right here</a>" ..
-        "<p>...or from the link in the page footer below</p></div>" 
+    control = function(devNo) 
+      local forum = luup.devices[devNo].environment.ABOUT.FORUM
+      return [[
+      <div>
+        <p><a class="w3-text-blue" href="https://smarthome.community" target="_blank">
+          smarthome.community - an independent place for smart home users to share experience</a></p>
+        <p><a class="w3-text-blue" href="https://www.justgiving.com/DataYours/" target="_blank">
+          If you like openLuup, you could DONATE to Cancer Research UK right here</a></p>
+        <p>...or from the link in the page footer below</p></div>]]
     end},
 
---
 --
 -- AltHue
 --
@@ -93,14 +101,24 @@ local panels = {
     end},
     
 --
+-- Camera
+--
+  DigitalSecurityCamera = {
+    control = function (devNo)
+      local ip = luup.attr_get ("ip", devNo) or ''
+      local stream = luup.variable_get (sid.camera, "DirectStreamingURL", devNo) or ''
+      local src = table.concat {"http://", ip, stream}
+      return div {class = "w3-panel", h.iframe {src = src, width="300", height="200"}}
+  end},
+--
 -- Motion Sensor
 --
 
-  MotionSensor = {
-    panel = function (devNo)
-      local time  = luup.variable_get (sid.security, "LastTrip", devNo)
-      return div {class = "w3-tiny w3-display-bottomright", time and todate(time) or ''}
-    end},
+--  MotionSensor = {
+--    panel = function (devNo)
+--      local time  = luup.variable_get (sid.security, "LastTrip", devNo)
+--      return div {class = "w3-tiny w3-display-bottomright", time and todate(time) or ''}
+--    end},
 
 --
 -- Netatmo
@@ -137,7 +155,8 @@ local panels = {
   SceneController = {
     panel = function (devNo)
       local time = luup.variable_get (sid.scene, "LastSceneTime", devNo)
-      return h.span (time and todate(time) or '')
+--      return h.span (time and todate(time) or '')
+      return div {class = "w3-tiny w3-display-bottomright", time and todate(time) or "---  00:00"}
     end,
     control = function ()
       return "<p>Scene Controller displays</p>"
@@ -177,6 +196,17 @@ local panels = {
             div {class = class, h.h5 "Today", today},
             div {class = class, h.h5 "Tomorrow", tomorrow} } }
     end},
+
+--
+-- ZWay
+--
+  ZWay = {
+    control = function() return 
+      div {
+        h.a {class="w3-text-blue", href="/cgi/zway_cgi.lua", target="_blank",
+          "Configure ZWay child devices"} }
+    end},
+
  
 }
 

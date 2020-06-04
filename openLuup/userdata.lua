@@ -1,13 +1,13 @@
 local ABOUT = {
   NAME          = "openLuup.userdata",
-  VERSION       = "2019.11.28",
+  VERSION       = "2020.03.31",
   DESCRIPTION   = "user_data saving and loading, plus utility functions used by HTTP requests",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   DEBUG         = false,
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -68,6 +68,10 @@ local ABOUT = {
 -- 2019.08.25   use local .svg icons for openLuup, AltAppStore, and VeraBridge plugins
 -- 2019.10.19   add modelID attribute, per latest Vera firmware (7.30)
 -- 2019.11.28   add openLuup table to saved user_data (for continuity of parameter settings between reloads)
+
+-- 2020.01.28   replace scene:user_table() with scene.definition, following object changes in scenes
+-- 2020.03.03   update ZWay implementation file to I_ZWay2.xml
+-- 2020.03.31   improve plugin loading and ordering
 
 
 local json    = require "openLuup.json"
@@ -197,9 +201,6 @@ luup.log "startup code completed"
 --
 -- pre-installed plugins
 --
-
-local default_plugins_version = "2016.11.15"  --<<<-- change this to force update of default_plugins
-
 local preinstalled = {
   
   openLuup = 
@@ -207,13 +208,11 @@ local preinstalled = {
     {
       AllowMultiple   = "0",
       Title           = "openLuup",
---      Icon            = "https://avatars.githubusercontent.com/u/4962913",
-      Icon            = "icons/openLuup.svg",
+      Icon            = "https://avatars.githubusercontent.com/u/4962913",  -- AltUI seems to need HTTPS
       Instructions    = "https://community.getvera.com/c/plugins-and-plugin-development/openluup",
       AutoUpdate      = "0",
       VersionMajor    = '',
       VersionMinor    = "baseline.",
-      TargetVersion   = default_plugins_version,      -- openLuup uses this for the InstalledPlugins2 version number
       id              = "openLuup",
       timestamp       = os.time(),
       Files           = (function ()                  -- generate this list dynamically
@@ -231,6 +230,70 @@ local preinstalled = {
         pattern   = ".+%.lua$",                       -- pattern match string for required files
         folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
        },
+    },
+  
+  AltAppStore =
+
+    {
+      AllowMultiple   = "0",
+      Title           = "Alternate App Store",
+      Icon            = "https://raw.githubusercontent.com/akbooer/AltAppStore/master/AltAppStore.png",
+      Instructions    = "https://github.com/akbooer/AltAppStore",
+      AutoUpdate      = "0",
+      VersionMajor    = '',
+      VersionMinor    = "baseline.",
+      id              = "AltAppStore",
+      timestamp       = os.time(),
+      Files           = {                             -- it's part of the openLuup baseline
+          {SourceName = "L_AltAppStore.lua"},         -- this is a physical file in ./openLuup/
+        },
+      Devices         = {
+        {
+          DeviceFileName  = "D_AltAppStore.xml",
+          DeviceType      = "urn:schemas-upnp-org:device:AltAppStore:1",
+          ImplFile        = "I_AltAppStore.xml",
+          Invisible       =  "0",
+        },
+      },
+      Repository      = {
+        type      = "GitHub",
+        source    = "akbooer/openLuup",               -- get this from openLuup, NOT from AltAppStore...
+        folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
+        target    = "./openLuup/",                    -- ...and put it back INTO ./openLuup/ folder
+        pattern   = "L_AltAppStore",                  -- only .lua file (others are in virtualfilesystem)
+      },
+    },
+
+  VeraBridge = 
+
+    {
+      AllowMultiple   = "1",
+      Title           = "VeraBridge",
+      Icon            = "https://raw.githubusercontent.com/akbooer/openLuup/master/icons/VeraBridge.png",
+      Instructions    = "http://forum.micasaverde.com/index.php/board,79.0.html",
+      AutoUpdate      = "0",
+      VersionMajor    = "not",
+      VersionMinor    = "installed",
+      id              = "VeraBridge",
+      timestamp       = os.time(),
+      Files           = {
+          {SourceName = "L_VeraBridge.lua"},          -- this is a physical file in ./openLuup/
+        },
+      Devices         = {
+        {
+          DeviceFileName  = "D_VeraBridge.xml",
+          DeviceType      = "VeraBridge",
+          ImplFile        = "I_VeraBridge.xml",
+          Invisible       =  "0",
+        },
+      },
+      Repository      = {
+        type      = "GitHub",
+        source    = "akbooer/openLuup",               -- actually comes from the openLuup repository
+        target    = "./openLuup/",                    -- ...and put it back INTO ./openLuup/ folder
+        pattern   = "L_VeraBridge",                   -- only .lua file (others are in virtualfilesystem)
+        folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
+      },
     },
 
   AltUI = 
@@ -263,71 +326,6 @@ local preinstalled = {
           '',               -- the main folder
           "/blockly",       -- and blocky editor
         },
-      },
-    },
-
-  AltAppStore =
-
-    {
-      AllowMultiple   = "0",
-      Title           = "Alternate App Store",
-      Icon            = "icons/AltAppStore.svg",
-      Instructions    = "https://github.com/akbooer/AltAppStore",
-      AutoUpdate      = "0",
-      VersionMajor    = '',
-      VersionMinor    = "baseline.",
-      id              = "AltAppStore",
-      timestamp       = os.time(),
-      Files           = {                             -- it's part of the openLuup baseline
-          {SourceName = "L_AltAppStore.lua"},         -- this is a physical file in ./openLuup/
-        },
-      Devices         = {
-        {
-          DeviceFileName  = "D_AltAppStore.xml",
-          DeviceType      = "urn:schemas-upnp-org:device:AltAppStore:1",
-          ImplFile        = "I_AltAppStore.xml",
-          Invisible       =  "0",
-        },
-      },
-      Repository      = {
-        type      = "GitHub",
-        source    = "akbooer/openLuup",               -- get this from openLuup, NOT from AltAppStore...
-        folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
-        target    = "./openLuup/",                    -- ...and put it back INTO ./openLuup/ folder
-        pattern   = "L_AltAppStore",                  -- only .lua file (others are in virtualfilesystem)
-      },
-    },
-
-  VeraBridge = 
-
-    {
-      AllowMultiple   = "1",
-      Title           = "VeraBridge",
---      Icon            = "https://raw.githubusercontent.com/akbooer/openLuup/master/icons/VeraBridge.png",
-      Icon            = "icons/VeraBridge.svg",
-      Instructions    = "http://forum.micasaverde.com/index.php/board,79.0.html",
-      AutoUpdate      = "0",
-      VersionMajor    = "not",
-      VersionMinor    = "installed",
-      id              = "VeraBridge",
-      timestamp       = os.time(),
-      Files           = {
-          {SourceName = "L_VeraBridge.lua"},          -- this is a physical file in ./openLuup/
-        },
-      Devices         = {
-        {
-          DeviceFileName  = "D_VeraBridge.xml",
-          DeviceType      = "VeraBridge",
-          ImplFile        = "I_VeraBridge.xml",
-          Invisible       =  "0",
-        },
-      },
-      Repository      = {
-        type      = "GitHub",
-        source    = "akbooer/openLuup",               -- actually comes from the openLuup repository
-        target    = "./openLuup/",                    -- ...and put it back INTO ./openLuup/ folder
-        pattern   = "L_VeraBridge",                   -- only .lua file (others are in virtualfilesystem)
-        folders   = {"/openLuup"},                    -- these are the bits of the repository that we want
       },
     },
   
@@ -376,7 +374,7 @@ local preinstalled = {
         {
           DeviceFileName  = "D_ZWay.xml",
           DeviceType      = "urn:akbooer-com:device:ZWay:1",
-          ImplFile        = "I_ZWay.xml",
+          ImplFile        = "I_ZWay2.xml",
           Invisible       =  "0",
         },
       },
@@ -391,9 +389,9 @@ local preinstalled = {
 
 local default_plugins = {
     preinstalled.openLuup,
-    preinstalled.AltUI,
     preinstalled.AltAppStore,
     preinstalled.VeraBridge,
+    preinstalled.AltUI,
     preinstalled.ZWay,
     preinstalled.MySensors,
   }
@@ -402,12 +400,11 @@ local default_plugins = {
 -- PLUGINS
 --
 
--- given installed plugin structure, generate index by ID
+-- given plugin list, generate index by ID
 local function plugin_index (plugins)
   local index = {}
   for i,p in ipairs (plugins) do
-    local id = tostring (p.id)
-    if id then index[id] = i end
+    index[tostring (p.id)] = i
   end
   return index
 end
@@ -473,7 +470,6 @@ local function update_plugin_versions (installed)
     
     local parent = d.device_num_parent
     if IP and (parent == 0 or parent == 2) then   -- LOCAL devices only! (incl. children of openLuup)
-      
       if i and a then     -- plugins with ABOUT.VERSION
         local v1,v2,v3,prerelease = (a.VERSION or ''): match "(%d+)%D+(%d+)%D*(%d*)(%S*)"
         if v3 then
@@ -615,32 +611,32 @@ local function load_user_data (user_data_json)
     -- PLUGINS
     _log "loading installed plugin info..."
     
-    local installed = user_data.InstalledPlugins2 or {}
+--    local installed = user_data.InstalledPlugins2 or {}
+    local installed = {}
+    for i,p in ipairs (default_plugins) do installed[i] = p end   -- initialize installed plugins
     local index = plugin_index (installed)
     
-    -- check TargetVersion of openLuup to see if InstalledPlugins2 defaults are current   
-    local ol = installed[index.openLuup] or {}
-    local refresh = ol.TargetVersion ~= default_plugins_version
-    
-    -- copy any missing defaults (may have been deleted) to the new list
-    for _, default_plugin in ipairs (default_plugins) do
-      local existing = index[tostring(default_plugin.id)]
-      if not existing then 
-        installed[#installed+1] = default_plugin          -- add any missing defaults
-      elseif refresh then 
-      default_plugin.VersionMajor = installed[existing].VersionMajor  -- preserve version info
-      default_plugin.VersionMinor = installed[existing].VersionMinor
-      installed[existing] = default_plugin                -- out of date, so replace info anyway
+    -- add others
+    local protected = {openLuup = true, AltAppStore = true, VeraBridge = true}   -- don't mess with these
+    for _, plugin in ipairs (user_data.InstalledPlugins2 or {}) do
+      local existing = index[tostring(plugin.id)]
+      if existing then 
+        if not protected[plugin.id] then
+          installed[existing] = plugin              -- replace any existing, unprotected, plugin data
+        end
+      else
+        installed[#installed+1] = plugin            -- add any missing
       end
     end
-    -- log the full list of installed plugins
     update_plugin_versions (installed)
+    attr.InstalledPlugins2 = installed
+    
+    -- log the full list of installed plugins
     for _, plugin in ipairs (installed) do
       local version = table.concat {plugin.VersionMajor or '?', '.', plugin.VersionMinor or '?'}
       local ver = "[%s] %s (%s)"
       _log (ver: format (plugin.id, plugin.Title, version))
     end
-    attr.InstalledPlugins2 = installed
   end
   _log "...user_data loading completed"
   return not msg, msg
@@ -724,7 +720,7 @@ local function json_user_data (localLuup)   -- refactored thanks to @explorer
   -- scenes
   local scenes = data.scenes
   for _, s in pairs (luup.scenes or {}) do
-    scenes[#scenes+1] = s: user_table ()
+    scenes[#scenes+1] = s.definition
   end    
   --
   return json.encode (data)   -- json text or nil, error message if any

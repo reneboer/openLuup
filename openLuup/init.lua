@@ -1,12 +1,12 @@
 local ABOUT = {
   NAME          = "openLuup.init",
-  VERSION       = "2019.10.14",
+  VERSION       = "2020.05.01",
   DESCRIPTION   = "initialize Luup engine with user_data, run startup code, start scheduler",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   LICENSE       = [[
-  Copyright 2013-2019 AK Booer
+  Copyright 2013-2020 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -58,6 +58,11 @@ local ABOUT = {
 -- 2019.07.31  use new server module (name reverted from http)
 -- 2019.10.14  set HTTP client port with client.start()
 
+-- 2020.03.18  report correct HTTP port in startup error message
+-- 2020.04.03  use optional arg[2] to define HTTP server port
+-- 2020.04.23  update Ace editor link to https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.11/ace.js
+-- 2020.05.01  log json module version info (thanks @a-lurker)
+
 
 local logs  = require "openLuup.logs"
 local lfs   = require "lfs"
@@ -83,6 +88,18 @@ local json          = require "openLuup.json"
 local historian     = require "openLuup.historian"
 
 local mime  = require "mime"
+
+logs.banner (compress.ABOUT)    -- doesn't announce itself
+logs.banner (timers.ABOUT)      -- ditto
+logs.banner (logs.ABOUT)        -- ditto
+
+logs.banner (json.ABOUT)
+if json.C then 
+  local cjson_banner = "using Cjson %s for fast decoding"
+  _log (cjson_banner: format (json.C._VERSION or "(unknown version)")) 
+else
+  _log ("Cjson not installed - using openLuup.json.Lua.decode() instead")
+end
 
 -- heartbeat monitor for memory usage and checkpointing
 local chkpt = 1
@@ -132,7 +149,7 @@ do -- set attributes, possibly decoding if required
     },
     Console = {
       Menu = "",           -- add user-defined menu JSON definition file here
-      Ace_URL = "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.5/ace.js",
+      Ace_URL = "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.11/ace.js",
       EditorTheme = "eclipse",
     },
     DataStorageProvider = {
@@ -265,11 +282,13 @@ end
 
 local status
 
-do -- SERVERs and SCHEDULER
-  local s = server.start (config.HTTP)      -- start the port 3480 Web server
+do --	 SERVERs and SCHEDULER
+  local port = tonumber(arg[2]) or config.HTTP.Port or 3480     -- port 3480 is default
+  config.HTTP.Port = port
+  local s = server.start (config.HTTP)      -- start the Web server
   client.start (config.HTTP)                -- and tell the client which ACTUAL port to use!
   if not s then 
-    error "openLuup - is another copy already running?  Unable to start HTTP port 3480 server" 
+    error ("openLuup - is another copy already running?  Unable to start HTTP server on port " .. port)
   end
 
   if config.SMTP then smtp.start (config.SMTP) end

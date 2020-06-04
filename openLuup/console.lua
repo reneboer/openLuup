@@ -2,16 +2,15 @@
 
 module(..., package.seeall)
 
-
 ABOUT = {
   NAME          = "console.lua",
-  VERSION       = "2019.12.26",
+  VERSION       = "2020.05.12",
   DESCRIPTION   = "console UI for openLuup",
   AUTHOR        = "@akbooer",
-  COPYRIGHT     = "(c) 2013-2019 AKBooer",
+  COPYRIGHT     = "(c) 2013-2020 AKBooer",
   DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
   LICENSE       = [[
-  Copyright 2013-19 AK Booer
+  Copyright 2013-20 AK Booer
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -26,6 +25,8 @@ ABOUT = {
   limitations under the License.
 ]]
 }
+
+local ABOUTopenLuup = luup.devices[2].environment.ABOUT   -- use openLuup about, not console
 
 -- 2017.04.26  HTML menu improvement by @explorer (thanks!)
 -- 2017.07.05  add user_data, status and sdata to openLuup menu
@@ -43,7 +44,7 @@ ABOUT = {
 -- 2018.05.19  use openLuup ABOUT, not console
 -- 2018.05.28  add Files HistoryDB menu
 -- 2018.07.08  add hyperlink database files to render graphics
--- 2018.07.12  add typerlink backup files to uncompress and retrieve
+-- 2018.07.12  add hyperlink backup files to uncompress and retrieve
 -- 2018.07.15  colour code non-200 status numbers
 -- 2018.07.19  use openLuup.whisper, not L_DataWhisper! (thanks @powisquare)
 -- 2018.07.28  use wsapi request and response libraries
@@ -69,6 +70,17 @@ ABOUT = {
 -- 2019.07.14  use new xml.createNewHtmlDocument() factory method
 -- 2019.07.31  use new server module (name reverted from http)
 -- 2019.08.20  add new "globals" page for individual devices
+
+-- 2020.01.25  add openLuup watch triggers
+-- 2020.01.27  start implementing object-oriented scene changes
+-- 2020.02.05  use object-oriented dev:rename() rather than call to requests
+-- 2020.02.12  add altid to Devices table (thanks @DesT)
+-- 2020.02.19  fix missing discontiguous items in xselect() menu choices
+-- 2020.03.08  added creation time to scenes table (thanks @DesT)
+-- 2020.03.10  add "Move to Trash" button for orphaned historian files
+-- 2020.03.17  remove autocomplete from action form parameters (passwords, etc...)
+-- 2020.03.19  colour device panel header according to status
+-- 2020.04.02  add App Store
 
 
 --  WSAPI Lua CGI implementation
@@ -110,7 +122,7 @@ end
 local options = luup.attr_get "openLuup.Console" or {}   -- get configuration parameters
 --[[
       Menu ="",           -- add menu JSON definition file here
-      Ace_URL = "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.3/ace.js",
+      Ace_URL = "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.11/ace.js",
       EditorTheme = "eclipse",
 ]]
 --
@@ -171,6 +183,7 @@ server.add_callback_handlers {XMLHttpRequest =
 
 local SID = {
   altui     = "urn:upnp-org:serviceId:altui1",                    -- 'DisplayLine1' and 'DisplayLine2'
+  appstore  = "urn:upnp-org:serviceId:AltAppStore1",
   ha        = "urn:micasaverde-com:serviceId:HaDevice1", 		      -- 'BatteryLevel'
   switch    = "urn:upnp-org:serviceId:SwitchPower1",              -- on/off control
   dimming   = "urn:upnp-org:serviceId:Dimming1",                  -- slider control
@@ -186,7 +199,7 @@ local _log    -- defined from WSAPI environment as wsapi.error:write(...) in run
 local script_name  -- name of this CGI script
   
 -- switch dynamically between different menu styles
-local menu_json = options.Menu ~= '' and options.Menu or "altui_console_menus.json"
+local menu_json = options.Menu ~= '' and options.Menu or "openLuup_menus.json"
 
 -- remove spaces from multi-word names and create index
 local short_name_index = {}       -- long names indexed by short names
@@ -197,7 +210,7 @@ local function short_name(name)
 end
  
 local page_groups = {
---    ["House Mode"]= {"home", "away", "night", "vacation"},
+    ["Apps"]      = {"plugins_table", "app_store", "luup_files"},
     ["Historian"] = {"summary", "cache", "database", "orphans"},
     ["System"]    = {"parameters", "top_level", "all_globals", "states", "sandboxes", "RELOAD"},
     ["Device"]    = {"control", "attributes", "variables", "actions", "events", "globals", "user_data"},
@@ -206,7 +219,7 @@ local page_groups = {
     ["Servers"]   = {"sockets", "http", "smtp", "pop3", "udp", "file_cache"},
     ["Utilities"] = {"backups", "images", "trash"},
     ["Lua Code"]  = {"lua_startup", "lua_shutdown", "lua_test", "lua_test2", "lua_test3"},
-    ["Tables"]    = {"rooms_table", "plugins_table", "devices_table", "scenes_table", "triggers_table"},
+    ["Tables"]    = {"rooms_table", "devices_table", "scenes_table", "triggers_table"},
     ["Logs"]      = {"log", "log.1", "log.2", "log.3", "log.4", "log.5", "startup_log"},
   }
 
@@ -241,9 +254,18 @@ local state =  {[-1] = "No Job", [0] = "Wait", "Run", "Error", "Abort", "Done", 
 local function todate (epoch) return os.date ("%Y-%m-%d %H:%M:%S", epoch) end
 local function todate_ms (epoch) return ("%s.%03d"): format (todate (epoch),  math.floor(1000*(epoch % 1))) end
 
+-- truncate to given length
+-- if maxlength is negative, truncate the middle of the string
 local function truncate (s, maxlength)
-  maxlength = maxlength or 24
-  if #s > maxlength then s = s: sub(1, maxlength) .. "..." end
+  maxlength = maxlength or 22
+  if maxlength < 0 then
+    maxlength = math.floor (maxlength / -2)
+    local nc = string.rep('.', maxlength)
+    local pattern = "^(%s)(..-)(%s)$"
+    s = s: gsub(pattern: format(nc,nc), "%1...%3")
+  else
+    if #s > maxlength then s = s: sub(1, maxlength) .. "..." end
+  end
   return s
 end
 
@@ -360,6 +382,16 @@ local function get_device_icon (d)
   return xhtml.a {href=selfref ("page=control&device=", d.attributes.id), img}
 end
 
+-- return HTML for navigation tree of current / previous pages
+-- (used at top of all pages and also at bottom of logs, to aid navigation)
+local function page_tree (current, previous)
+  local pagename = capitalise (current)
+  return xhtml.span {class = "w3-container w3-cell w3-cell-middle w3-round w3-border w3-border-grey",
+          xhtml.a {class="nodec", href = selfref ("page=", previous), unicode.leftwards_double_arrow}, " / ", 
+          xhtml.a {class="nodec", href = selfref "page=home", "Home"},     " / ", 
+          pagename}
+end
+
 -- create HTML for a group of house mode buttons
 -- selected parameter is a string, e.g. "1,3" with 'on' buttons 
 local function house_mode_group (selected)  
@@ -421,9 +453,10 @@ end
 -- build a vertical menu for the sidebar
 local function filter_menu (items, current_item, request)
   local menu = xhtml.div {class = "w3-margin-bottom  w3-border w3-border-grey"}
-  for i, name in ipairs (items) do
+  for i, item in ipairs (items) do
+    local name = (type(item) == "table") and item[1] or item  -- can be string or list
     local colour = (name == current_item) and "w3-grey" or "w3-light-gray"
-    menu[i] = xhtml.a {class = "w3-bar-item w3-button "..colour, href = selfref (request, name), name }
+    menu[i] = xhtml.a {class = "w3-bar-item w3-button "..colour, href = selfref (request, name), item }
   end
   return xhtml.div {class="w3-bar-block w3-col", style="width:12em;", menu}
 end
@@ -436,13 +469,21 @@ local function device_sort (p)
   return filter_menu ({"Sort by Name", "Sort by Id"}, p.dev_sort, "dev_sort=")
 end
 
+local function scene_sort (p)
+  return filter_menu ({"Sort by Name", "Sort by Id", "Sort by Date"}, p.dev_sort, "dev_sort=")
+end
+
 -- returns an iterator which sorts items, key= "Sort by Name" or "Sort by Id" 
 -- works for devices, scenes, and variables
 local function sorted_by_id_or_name (p, tbl)  -- _or_description
+  local sort_options = {
+    ["Sort by Id"]    = function (_, id) return id end,   -- NB: NOT the same as x.id (which is altid)!
+    ["Sort by Name"]  = function (x) return x.description or x.name end,    -- name is for variables
+    ["Sort by Date"]  = function (x) return -((x.definition or empty).Timestamp or 0) end} -- for scenes only
+  local sort_index = sort_options[p.dev_sort] or function () end
   local x = {}
-  local by_name = p.dev_sort == "Sort by Name"
   for id, item in pairs (tbl) do 
-    x[#x+1] = {item = item, key = by_name and (item.description or item.name) or id} 
+    x[#x+1] = {item = item, key = sort_index(item, id) or id} 
   end
   table.sort (x, function (a,b) return a.key < b.key end)
   local i = 0
@@ -495,16 +536,18 @@ local function luup_triggers (scn_no)
   local triggers = {}
   local scenes = scn_no and {[scn_no] = luup.scenes[scn_no]} or luup.scenes
   for s, scn in pairs (scenes) do
-    local info = scn: user_table() --.triggers
+    local info = scn.definition --.triggers
     for _, t in ipairs (info.triggers or {}) do
       local devNo = t.device
-      if devNo ~= 2 then    -- else ignore openLuup trigger warning
+--      if devNo ~= 2 then    -- else ignore openLuup trigger warning
         local json = ((luup.devices[devNo] or empty).attributes or empty).device_json
         local events = (loader.static_data[json] or empty) .eventList2 or empty
         local template = events[tonumber(t.template or 0)] or empty
+        local args = {}
+        for i, arg in ipairs (t.arguments or empty) do args[i] = arg.value end
         local text = (template.label or empty) . text or '?'
-        triggers[#triggers+1] = {scn = s, name = t.name, dev = devNo, text = text}
-      end
+        triggers[#triggers+1] = {scn = s, name = t.name, dev = devNo, text = text, args = args}
+--      end
     end
   end
   return triggers
@@ -514,7 +557,7 @@ end
 -- make a drop-down selection for things
 local function xselect (hidden, options, selected, presets)
   local sorted = {}
-  for i,v in ipairs (options or empty) do sorted[i]  = v end
+  for _,v in pairs (options or empty) do sorted[#sorted+1]  = v end
   table.sort (sorted)
   local choices = xhtml.select {style="width:12em;", name="value", onchange="this.form.submit()"} 
   local function choice(x) 
@@ -601,7 +644,7 @@ function actions.bookmark (p)
   end
   local scn = luup.scenes[tonumber (p.scn)]
   if scn then
-    local a = scn.user_table ()
+    local a = scn.definition
     a.favorite = not a.favorite
   end
 end
@@ -619,12 +662,12 @@ end
 
 function actions.toggle_pause (p)
   local scene = luup.scenes[tonumber (p.scn)]
-  if scene then scene.on_off () end
+  if scene then scene: on_off() end
 end
 
 function actions.run_scene (p)
   local scene = luup.scenes[tonumber (p.scn)]
-  if scene then scene.run () end    -- TODO: run this asynchronously?
+  if scene then scene: run (nil, nil, {actor = "openLuup console"}) end    -- TODO: run this asynchronously?
 end
 
 function actions.slider (_, req)
@@ -654,7 +697,9 @@ end
 -- action=update_plugin&plugin=openLuup&update=version
 function actions.update_plugin (_, req)
   local q = req.params
-  requests.update_plugin ('', {Plugin=q.plugin, Version=q.version})
+  local v = q.version
+  v = (#v > 0) and v or "master"
+  requests.update_plugin ('', {Plugin=q.plugin, Version=v})
   -- actual update is asynchronous, so return is not useful
 end
 
@@ -663,9 +708,9 @@ function actions.call_action (_, req)
   local q = req.POST    -- it must be a post in order to loop through the params
   if q then
     local act, srv, dev = q.act, q.srv, q.dev
-    q.act, q.srv, q.dev = nil, nil, nil         -- remove these from the request and use the rest of the parameter list
-    -- action returns: error, message, jobNo, arrguments
+    q.act, q.srv, q.dev = nil, nil, nil     -- remove these and use the rest of the parameter list
 --    print ("ACTION", act, srv, dev)
+    -- action returns: error, message, jobNo, arguments
     local e,m,j,a = luup.call_action  (srv, act, q, tonumber (dev))
     local _ = {e,m,j,a}   -- TODO: write status return to message?
   end
@@ -678,7 +723,8 @@ function actions.delete (p)
   elseif p.dev then
     requests.device ('', {action = "delete", device = p.dev}) 
   elseif p.scn then
-    requests.scene ('', {action = "delete", scene = p.scn})
+--    requests.scene ('', {action = "delete", scene = p.scn})
+    scenes.delete (tonumber(p.scn))    -- 2020.01.27
   elseif p.plugin then
     requests.delete_plugin ('', {PluginNum = p.plugin})
   elseif p.var then
@@ -1000,11 +1046,12 @@ function pages.log (p)
   if f then
     local x = f:read "*a"
     f: close()
---    pre = xhtml.pre {xml.escape (x)}
-    pre = xhtml.pre {x}     -- 2019.07.14  new HTML escapes all text
+    pre = xhtml.pre {x}
   end
   local end_of_page_buttons = page_group_buttons (page)
-  return page_wrapper(name, pre, xhtml.div (end_of_page_buttons))
+  return page_wrapper(name, pre, xhtml.div {class="w3-container w3-row w3-margin-top",
+      page_tree (page, p.previous), 
+      xhtml.div {class="w3-container w3-cell", xhtml.div (end_of_page_buttons)}})
 end
 
 for i = 1,5 do pages["log." .. i] = pages.log end         -- add the older file versions
@@ -1415,11 +1462,13 @@ local function database_tables ()
   t.header  {'', "archives", "(kB)", "fct", {"#updates", colspan=2}, "filename (node.dev.srv.var)" }
   t2.header {'', "archives", "(kB)", "fct", '', '', "filename (node.dev.srv.var)"}
   local prev
+  local orphans = {}
   for _,f in ipairs (files) do 
     local devnum = f.devnum     -- openLuup device number (if present)
     local tbl = t
     if devnum == '' then
       tbl = t2
+      orphans[#orphans+1] = f.name
     elseif devnum ~= prev then 
       t.row { {xhtml.strong {'[', f.devnum, '] ', f.description}, colspan = 6} }
     end
@@ -1428,17 +1477,30 @@ local function database_tables ()
   end
   
   if t2.length() == 0 then t2.row {'', "--- none ---", ''} end
-  return t, t2
+  return t, t2, orphans
 end
 
 pages.database = function (...) 
-  local t, _ = database_tables(...) 
+  local t, _ = database_tables() 
   return page_wrapper ("Data Historian Disk Database", t) 
 end
 
-pages.orphans = function (...) 
-  local _, t = database_tables(...) 
-  return page_wrapper ("Orphaned Database Files  - from non-existent devices", t) 
+pages.orphans = function (p) 
+  local _, t, orphans = database_tables() 
+  if p and p.TrashOrphans == "yes" then
+    local folder = luup.attr_get "openLuup.Historian.Directory"
+    for _, o in pairs (orphans) do
+      local old, new = folder .. o, "trash/" ..o
+      lfs.link (old, new)
+      os.remove (old)
+    end
+    t = nil   -- they should all have gone
+  end
+  local trash = xhtml.div {class = "w3-panel",
+    xhtml.a {class="w3-button w3-round w3-red", 
+      href = selfref "TrashOrphans=yes", "Move All to Trash", title="move all orphans to trash",
+      onclick = "return confirm('Trash All Orphans: Are you sure?')" } }
+  return page_wrapper ("Orphaned Database Files  - from non-existent devices", trash, t) 
 end
 
 -- file cache
@@ -1573,7 +1635,11 @@ local function device_panel (self)          -- 2019.05.12
     
     local battery = (((self.services[SID.ha] or empty) .variables or empty) .BatteryLevel or empty) .value
     battery = battery and (battery .. '%') or ' '
-    top_panel = div {class="top-panel", 
+    local state = self: status_get()
+    -- states correspond to the scheduler job states
+    -- colours to their AltUI (possibly Vera) representations
+    local cs = {[0] = "-cyan", "-green", "-red", "-red", "-green", "-cyan", "-cyan", "-cyan"}
+    top_panel = div {class="top-panel" .. (cs[state] or ''),
       bookmark, ' ', truncate (devname (id)), span{style="float: right;", battery }}
   end
   
@@ -1586,9 +1652,12 @@ local function device_panel (self)          -- 2019.05.12
       main_panel = div {line1 or '', xhtml.br{}, line2 or ''}
     else
       local switch, slider = device_controls(self)
+      local time = self: variable_get (SID.security, "LastTrip")
+      time = time and div {class = "w3-tiny w3-display-bottomright", todate(time.value) or ''} or nil
       main_panel = div {
         div {class="w3-display-topright w3-padding-small", switch},
-        div {class="w3-display-bottommiddle", slider}}
+        div {class="w3-display-bottommiddle", slider},
+        time}
     end
   end
   
@@ -1791,12 +1860,17 @@ function pages.actions (p)
             if (v.direction or ''): match "in" then 
               args[#args+1] = xhtml.div {
                 xhtml.label {class= "w3-small", v.name},
-                xhtml.input {class="w3-input w3-border w3-hover-border-red", type="text", size= 40, name = v.name} }
+                xhtml.input {class="w3-input w3-border w3-hover-border-red", 
+                  type="text", autocomplete="off", size= 40, name = v.name} }  -- 2020.03.17 no autocomplete
             end
           end
         end
       end
     end
+--    local function service_menu () return filter_menu ({"All Services","Defined Services"},'', "svc=") end
+--    local sortmenu = sidebar (p, service_menu, device_sort)
+--    local rdiv = xhtml.div {sortmenu, xhtml.div {class="w3-rest w3-panel", t} }
+--    return title .. " - implemented actions", rdiv
     return title .. " - implemented actions", t
   end)
 end
@@ -1871,7 +1945,7 @@ local function room_wanted (p)
   local room_number = room_index[room]
   return function (x)  -- works for devices or scenes
     local room_match = all_rooms or x.room_num == room_number
-    local scene_favorite = x.page and x:user_table().favorite               -- only scenes have pages
+    local scene_favorite = x.page and x.definition.favorite               -- only scenes have pages
     local device_favorite = x.attributes and x.attributes.bookmark == '1'   -- only devices have attributes
     local bookmarked = scene_favorite or device_favorite
     return room_match or (bookmarks and bookmarked)
@@ -1909,20 +1983,22 @@ end
   body = {middle = ..., topright = ..., bottomright = ...},
   widgets = { w1, w2, ... },
 --]]
-local function generic_panel (x)
+local function generic_panel (x, panel_type)
+  panel_type = panel_type or "tim-panel"
   local div = xhtml.div
-      local widgets = xhtml.span {class="w3-wide"}
-      for i,w in ipairs (x.widgets or empty) do widgets[i] = w end
-      return xhtml.div {class = "w3-small w3-margin-left w3-margin-bottom w3-round w3-border w3-card tim-panel",
-        div {class="top-panel", 
-          truncate (x.top_line.left or ''), 
-          xhtml.span{style="float: right;", x.top_line.right or '' } }, 
-        div {class = "w3-display-container", style = table.concat {"height:", x.height, "px;"},
+  local widgets = xhtml.span {class="w3-wide"}
+  for i,w in ipairs (x.widgets or empty) do widgets[i] = w end
+  local class = "w3-small w3-margin-left w3-margin-bottom w3-round w3-border w3-card " .. panel_type
+  return xhtml.div {class = class,
+    div {class="top-panel", 
+      truncate (x.top_line.left or ''), 
+      xhtml.span{style="float: right;", x.top_line.right or '' } }, 
+    div {class = "w3-display-container", style = table.concat {"height:", x.height, "px;"},
 --          div {class="w3-padding-small w3-margin-left w3-display-left ", x.icon } , 
-          div {class="w3-margin-left w3-display-left ", x.icon } , 
-          div {class="w3-display-middle", x.body.middle},
-          div {class="w3-padding-small w3-display-topright", x.body.topright } ,
-          div {class="w3-padding-small w3-display-bottomright", x.widgets and div(x.widgets) or x.body.bottomright } 
+      div {class="w3-margin-left w3-display-left ", x.icon } , 
+      div {class="w3-display-middle", x.body.middle},
+      div {class="w3-padding-small w3-display-topright", x.body.topright } ,
+      div {class="w3-padding-small w3-display-bottomright", x.widgets and div(x.widgets) or x.body.bottomright } 
           }  } 
 end
 
@@ -1936,7 +2012,7 @@ local function scene_page (p, fct)
 end
 
 local function scene_panel (self)
-  local utab = self: user_table()
+  local utab = self.definition
   
   --TODO: move scene next run code to scenes module
   local id = utab.id
@@ -1985,7 +2061,7 @@ end
 
 function pages.header (p)
   return scene_page (p, function (scene, title)
-    local modes = scene: user_table() .modeStatus
+    local modes = scene.definition.modeStatus
     return title .. " - scene header", 
       xhtml.div {class="w3-row", 
         xhtml.div{class="w3-col", style="width:550px;", 
@@ -2014,50 +2090,48 @@ function pages.triggers (p)
   return scene_page (p, function (scene, title)
     local h = xhtml
     local T = h.div {class = "w3-container w3-cell"}
---    for i, t in ipairs (scene:user_table() .triggers) do
-      
---      local d, woo = 28, 14
---      local dominos = t.enabled == 1 and 
---          h.img {width = d, height=d, title="trigger is enabled", alt="trigger", src="icons/trigger-grey.svg"}
---        or 
---          h.img {width=d, height=d, title="trigger is paused", src="icons/trigger-grey.svg"} 
-      
---      local on_off = xhtml.a {href= selfref("toggle=", i), title="toggle pause", 
---        class= "w3-hover-opacity", xhtml.img {width=woo, height=woo, src="icons/power-off-solid.svg"} }
---      local w1 = widget_link ("page=trigger&edit=".. i, "view/edit trigger", "icons/edit.svg")
---      local w2 = delete_link ("trigger", i)
---      local icon =  h.div {class="w3-padding-small", style = "border:2px solid grey; border-radius: 4px;", dominos }
---      local desc = h.div {"dev: ", t.device}
---      T[i] = generic_panel {
---        title = t,
---        height = 100,
---        top_line = {left =  truncate (t.name), right = on_off},
---        icon = icon,
---        body = {middle = desc},
---        widgets = {w1, w2},
---      }        
---    end
-    local watches = altui_device_watches (scene:user_table().id)
+    for i, t in ipairs (scene.definition.triggers) do
+      if t.device == 2 then       -- only display openLuup variable watch triggers
+        local d, woo = 28, 14
+        local dominos = t.enabled == 1 and 
+            h.img {width = d, height=d, title="trigger is enabled", alt="trigger", src="icons/trigger-grey.svg"}
+          or 
+            h.img {width=d, height=d, title="trigger is paused", alt = 'pause', src="icons/pause-solid-grey.svg"} 
+        
+        local on_off = xhtml.a {href= selfref("toggle=", i), title="toggle pause", 
+          class= "w3-hover-opacity", xhtml.img {width=woo, height=woo, src="icons/power-off-solid.svg"} }
+        local w1 = widget_link ("page=trigger&edit=".. i, "view/edit trigger", "icons/edit.svg")
+        local w2 = delete_link ("trigger", i)
+        local icon =  h.div {class="w3-padding-small", style = "border:2px solid grey; border-radius: 4px;", dominos }
+        local desc
+          -- openLuup watch
+          local args = t.arguments or empty
+          local function arg(n, lbl) return h.span {lbl or '', ((args[n] or empty).value or ''): match "[^:]+$", h.br()} end
+          desc = h.span {arg(1, '#'), arg(2), arg(3)}
+        T[i] = generic_panel {
+          title = t,
+          height = 100,
+          top_line = {left =  truncate (t.name), right = on_off},
+          icon = icon,
+          body = {middle = desc},
+          widgets = {w1, w2},
+        }        
+      end
+    end
+    local watches = altui_device_watches (scene.definition.id)
     for i, t in ipairs (watches) do
       
-      local d, woo = 28, 14
-      local nbsp = unicode.nbsp
+      local d = 28
       local dominos = 
           h.img {width = d, height=d, title="trigger is enabled", alt="trigger", src="icons/trigger-grey.svg"}
-      
---      local on_off = xhtml.a {href= selfref("toggle=", i), title="toggle pause", 
---        class= "w3-hover-opacity", xhtml.img {width=woo, height=woo, src="icons/power-off-solid.svg"} }
-      local w1 = widget_link ("page=trigger&edit=".. t.scn, "view/edit trigger", "icons/edit.svg")
---      local w2 = delete_link ("trigger", i)
       local icon =  h.div {class="w3-padding-small", style = "border:2px solid grey; border-radius: 4px;", dominos }
       local desc = h.div {'#', t.dev, h.br(), t.srv, h.br(), t.var}
       T[#T+1] = generic_panel {
         title = '',
         height = 100,
-        top_line = {left = truncate ("AltUI watch #" .. tostring(i)), right = on_off},
+        top_line = {left = truncate ("AltUI watch #" .. tostring(i))},
         icon = icon,
         body = {middle = desc},
---        widgets = {w1},
       }        
     end
     local create = xhtml.a {class="w3-button w3-round w3-green", 
@@ -2070,7 +2144,7 @@ function pages.timers (p)
   return scene_page (p, function (scene, title)
     local h = xhtml
     local T = h.div {class = "w3-container w3-cell"}
-    for i, t in ipairs (scene:user_table() .timers) do
+    for i, t in ipairs (scene.definition.timers) do
       local next_run = table.concat {unicode.clock_three, ' ', t.abstime or nice (t.next_run) or ''}
       local info =
         t.type == 1 and t.interval or
@@ -2084,7 +2158,8 @@ function pages.timers (p)
       local clock = t.enabled == 1 and 
           h.img {width = d, height=d, title="timer is running", alt="timer", src="icons/clock-grey.svg"}
         or 
-          h.img {width=d, height=d, title="timer is paused", src="icons/circle-regular-grey.svg"} 
+--          h.img {width=d, height=d, title="timer is paused", src="icons/circle-regular-grey.svg"} 
+          h.img {width=d, height=d, title="timer is paused", src="icons/pause-solid-grey.svg"} 
       
       local on_off = xhtml.a {href= selfref("toggle=", t.id), title="toggle pause", 
         class= "w3-hover-opacity", xhtml.img {width=woo, height=woo, src="icons/power-off-solid.svg"} }
@@ -2111,7 +2186,7 @@ end
 function pages.history (p)
   return scene_page (p, function (scene, title)
     local h = {}
-    for i,v in ipairs (scene: user_table() .openLuup.history) do h[i] = {nice(v.at), v.by} end
+    for i,v in ipairs (scene.openLuup.history) do h[i] = {nice(v.at), v.by} end
     table.sort (h, function (a,b) return a[1] > b[1] end)
     local t = create_table_from_data  ({"date/time", "initiated by"}, h)
     return title .. " - scene history", t
@@ -2121,7 +2196,7 @@ end
 function pages.lua (p)
   return scene_page (p, function (scene, title)
     local readonly = true
-    local Lua = scene:user_table() .lua
+    local Lua = scene.definition.lua
     return title .. " - scene Lua", 
       xhtml.div {code_editor (Lua, 500, "lua", readonly)}
   end)
@@ -2129,8 +2204,30 @@ end
  
 function pages.group_actions (p)
   return scene_page (p, function (scene, title)
-    local pre = xhtml.pre {json.encode (scene:user_table() .groups)}
-    return title .. " - actions (in delay groups)", pre
+    local h = xhtml
+    local groups = h.div {class = "w3-container"}
+    for g, group in ipairs (scene.definition.groups) do
+      local delay = tonumber (group.delay) or 0
+      local d = h.div{class = "w3-panel", h.div {class = "w3-panel w3-grey", h.h5 {"Delay ", delay}}}
+      for i, a in ipairs (group.actions) do
+        local srv = a.service: match "[^:]+$" or a.service
+        local desc = h.div {'#', a.device, h.br(), srv}
+        for _, arg in pairs(a.arguments) do
+          desc[#desc+1] = h.br()
+          desc[#desc+1] = h.span {arg.name, '=', arg.value}
+        end
+        d[i+1] = generic_panel {
+          title = a.action,
+          height = 100,
+          top_line = {left = a.action},
+          icon = h.img {alt = "no icon", src = luup.devices[tonumber(a.device)]: get_icon()},
+          body = {middle = desc},
+--          widgets = {w1, w2},
+        }        
+      end
+      groups[g] = d
+    end
+    return title .. " - actions (in delay groups)", groups
   end)
 end
  
@@ -2434,24 +2531,27 @@ end
 function pages.devices_table (p, req)
   local q = req.POST
   if q.rename and q.value then
-    requests.device ('', {action="rename", device=q.rename, name=q.value, room=nil})
+    local dev = luup.devices[tonumber(q.rename)]
+    if dev then dev: rename (q.value, nil) end
   elseif q.reroom then
-    requests.device ('', {action="rename", device=q.reroom, name=nil, room=q.value})
+    local dev = luup.devices[tonumber(q.reroom)]
+    if dev then dev: rename (nil, q.value) end
   end
   local create = xhtml.a {class="w3-button w3-round w3-green", 
     href = selfref "page=create_device", "+ Create", title="create new device"}
   local t = xhtml.table {class = "w3-small w3-hoverable"}
-  t.header {"id", "name", '', "room", "delete"}  
+  t.header {"id", "name", "altid", '', "room", "delete"}  
   local wanted = room_wanted(p)        -- get function to filter by room  
   for d in sorted_by_id_or_name (p, luup.devices) do
     local devNo = d.attributes.id
     if wanted(d) then 
+      local altid = xhtml.div {title=d.id, truncate (d.id, -22)}    -- drop off the middle of the string
       local trash_can = devNo == 2 and '' or delete_link ("dev", devNo, "device")
       local bookmark = xhtml.span{class="w3-display-right", d.attributes.bookmark == '1' and unicode.black_star or ''}
       local link = xlink ("page=control&device="..devNo)
       local current_room = luup.rooms[d.room_num] or "No Room"
       local room_selection = xselect ({reroom=devNo}, luup.rooms, current_room, {"No Room"})
-      t.row {devNo, editable_text({rename=devNo}, d.description), 
+      t.row {devNo, editable_text({rename=devNo}, d.description), altid,
         xhtml.div {class="w3-display-container", style="width:40px;", link, bookmark}, 
           room_selection, trash_can} 
     end
@@ -2468,7 +2568,7 @@ function pages.scene_created (_,req)
   local div
   if q.name ~= '' then
     local scn = scenes.create {name = name}
-    local scnNo = scn:user_table().id
+    local scnNo = scn.definition.id
     local msg = "Scene #%d '%s' created"
     if scnNo then     -- offer to go there
       luup.scenes[scnNo] = scn      -- insert into scene table
@@ -2498,37 +2598,38 @@ function pages.scenes_table (p, req)
   -- rename scene
   if q.rename and q.value then
     local s = luup.scenes[tonumber(q.rename)]
-    if s then s.rename (q.value) end
+    if s then s: rename (q.value) end
   elseif q.reroom and q.value then
     local s = luup.scenes[tonumber(q.reroom)]
     local num = 0                       -- default is "No Room"
     for i,v in pairs (luup.rooms) do    -- convert from room name to room number
       if v == q.value then num = i break end
     end
-    s.rename (nil, num)
+    s: rename (nil, num)
   end
   local create = xhtml.a {class="w3-button w3-round w3-green", 
     href = selfref "page=create_scene", "+ Create", title="create new scene"}
   local scn = {}
   local wanted = room_wanted(p)        -- get function to filter by room  
+  local ymdhms = "%y-%m-%d %X"
   for x in sorted_by_id_or_name (p, luup.scenes) do
-    local u = x: user_table()
-    local n = u.id
+    local n = x.definition.id
     if wanted(x) and paused_or_not(p, x) then 
-      local favorite = xhtml.span{class="w3-display-middle", x:user_table().favorite and unicode.black_star or ''}
+      local favorite = xhtml.span{class="w3-display-middle", x.definition.favorite and unicode.black_star or ''}
       local paused = x.paused and 
         xhtml.img {height=14, width=14, class="w3-display-right", src="icons/pause-solid.svg"} or ''
       local link = xlink ("page=header&scene="..n)
       local current_room = luup.rooms[x.room_num] or "No Room"
+      local timestamp = os.date (ymdhms, x.definition.Timestamp or 0)
       local room_selection = xselect ({reroom=n}, luup.rooms, current_room, {"No Room"})
       scn[#scn+1] = {n,  editable_text({rename=n}, x.description), 
         xhtml.div {class="w3-display-container", style="width:60px;", link, favorite, paused}, 
-        room_selection, delete_link ("scn", n, "scene")}
+        room_selection, timestamp, delete_link ("scn", n, "scene")}
     end
   end
-  local t = create_table_from_data ({"id", "name", '', "room", "delete"}, scn)  
+  local t = create_table_from_data ({"id", "name", '', "room", "created", "delete"}, scn)  
   t.class = "w3-small w3-hoverable"
-  local room_nav = sidebar (p, rooms_selector, device_sort, scene_filter)
+  local room_nav = sidebar (p, rooms_selector, scene_sort, scene_filter)
   local sdiv = xhtml.div {room_nav, xhtml.div {class="w3-rest w3-panel", create, t} }
   return page_wrapper ("Scenes Table", sdiv)
 end
@@ -2541,34 +2642,44 @@ function pages.triggers_table (p)
   
   local all = request_type == options[1]
   local triggers = xhtml.div {class="w3-rest w3-panel"}
+  local Tluup = luup_triggers ()    -- {{scn = s, name = t.name, dev = devNo, text = text}}
     
   local Otrg = {}
   if all or request_type == options[2] then
-    -- local Topen = {}
-    local o = create_table_from_data ({'#', "scene", "watching: device.service.variable", "Lua conditional"}, Otrg)  
-    triggers[#triggers+1] = xhtml.div {xhtml.h5 "openLuup Device Variable Watch Triggers", o}
+    for _, x in ipairs (Tluup) do
+      if x.dev == 2 then              -- this is an openLuup Variable Watch trigger
+        local i = #Otrg + 1
+        local link = xlink ("page=triggers&scene="..x.scn)
+        local watch = table.concat (x.args, '.')
+        Otrg[i]= {i, x.name, link, rhs(x.scn), watch}
+      end
+    end
+    local o = create_table_from_data ({'#', "name", {colspan=2, "scene"}, "watching: device.service.variable"}, Otrg)  
+    triggers[#triggers+1] = xhtml.div {xhtml.h5 "openLuup Variable Watch Triggers", o}
   end
   
   local Atrg = {}
   if all or request_type == options[3] then
     local Taltui = altui_device_watches ()    -- {srv = srv, var = v, dev = dev, scn = scn, lua = l}
     for i, x in ipairs (Taltui) do
-      local link = xlink ("page=header&scene="..x.scn)
-      Atrg[i]= {i, link, rhs(x.scn), table.concat ({x.dev, x.srv, x.var}, '.'), x.lua}
+      local link = xlink ("page=triggers&scene="..x.scn)
+      Atrg[i]= {i, "AltUI watch", link, rhs(x.scn), table.concat ({x.dev, x.srv, x.var}, '.'), x.lua}
     end
     local t = create_table_from_data (
-      {'#', {colspan=2, "scene"}, "watching: device.service.variable", "Lua conditional"}, Atrg)  
-    triggers[#triggers+1] = xhtml.div {xhtml.h5 "AltUI Device Variable Watch Triggers", t}   
+      {'#', "name", {colspan=2, "scene"}, "watching: device.service.variable", "Lua conditional"}, Atrg)  
+    triggers[#triggers+1] = xhtml.div {xhtml.h5 "AltUI Variable Watch Triggers", t}   
   end
   
   local Ltrg = {}
   if all or request_type == options[4] then
-    local Tluup = luup_triggers ()    -- {{scn = s, name = t.name, dev = devNo, text = text}}
-    for i, x in ipairs (Tluup) do
-      local link = xlink ("page=header&scene="..x.scn)
-      Ltrg[i]= {i, link, rhs(x.scn), rhs(x.dev), x.name, x.text}
+    for _, x in ipairs (Tluup) do
+      if x.dev ~= 2 then            -- skip the openLuup triggers
+        local i = #Ltrg + 1
+        local link = xlink ("page=triggers&scene="..x.scn)
+        Ltrg[i]= {i, x.name, link, rhs(x.scn), rhs(x.dev), x.text}
+      end
     end
-    local l = create_table_from_data ({'#', {colspan=2, "scene"}, "device", "event", "text"}, Ltrg)  
+    local l = create_table_from_data ({'#', "name", {colspan=2, "scene"}, "device", "description"}, Ltrg)  
     triggers[#triggers+1] = xhtml.div {xhtml.h5 "Luup UPnP Triggers (ignored by openLuup)", l}
   end
       
@@ -2643,17 +2754,12 @@ function pages.plugins_table (_, req)
     for folder in (q.folders or ''): gmatch "[^,%s]+" do    -- comma or space separated list
       folders[#folders+1] = folder
     end
-    P.Repository = {source = q.repository, pattern=q.pattern, folders = folders}
+    P.Repository = {type = "GitHub", source = q.repository, pattern=q.pattern, folders = folders}
   end
   ---
   local t = xhtml.table {class = "w3-bordered"}
-  t.header {'', "Name","Version", "Auto", "Files", "Actions", "Update", '', "Unistall"}
+  t.header {'', "Name","Version", "Files", '', "Update", "Unistall"}
   for _, p in ipairs (IP2) do
-    -- http://apps.mios.com/plugin.php?id=8246
-    local src = p.Icon or ''
-    local mios_plugin = src: match "^plugins/icons/"
-    if mios_plugin then src = "http://apps.mios.com/" .. src end
-    local icon = xhtml.img {src=src, alt="no icon", height=35, width=35} 
     local version = table.concat ({p.VersionMajor or '?', p.VersionMinor}, '.')
     local files = {}
     for _, f in ipairs (p.Files or empty) do files[#files+1] = f.SourceName end
@@ -2664,30 +2770,290 @@ function pages.plugins_table (_, req)
     files = xhtml.form {action=selfref(), 
       xhtml.input {hidden=1, name="page", value="viewer"},
       xhtml.select (choice)}
-    local auto_update = p.AutoUpdate == '1' and unicode.check_mark or ''
-    local edit = xhtml.a {href=selfref "page=plugin&plugin="..p.id, title="edit",
-      xhtml.img {src="/icons/edit.svg", alt="edit", height=24, width=24} }
-    local help = xhtml.a {href=p.Instructions or '', target="_blank", title="help",
-      xhtml.img {src="/icons/question-circle-solid.svg", alt="help", height=24, width=24} }
-    local info = xhtml.a {target="_blank", title="info",
-      href=table.concat {"http://github.com/",p.Repository.source or '',"#readme"}, 
-      xhtml.img {src="/icons/info-circle-solid.svg", alt="info", height=24, width=24} }
-    local update = xhtml.form {
+    
+    local ignore = {AltAppStore = '', VeraBridge = ''}
+    
+    local GitHub_Mark = "https://raw.githubusercontent.com/akbooer/openLuup/development/icons/GitHub-Mark-64px.png"
+    local github = xhtml.a {href="https://github.com/"  .. (p.Repository.source or ''), target="_blank", 
+      xhtml.img {title="go to GitHub repository", src=GitHub_Mark, alt="GitHub", height=32, width=32} }
+    
+    local update = ignore[p.id] or xhtml.form {
       action = selfref(), method="post",
       xhtml.input {hidden=1, name="action", value="update_plugin"},
       xhtml.input {hidden=1, name="plugin", value=p.id},
       xhtml.div {class="w3-display-container",
+        -- TODO: should the following name be "update" or "version" ???
         xhtml.input {class="w3-hover-border-red", type = "text", autocomplete="off", name="version", value=''},
         xhtml.input {class="w3-display-right", type="image", src="/icons/retweet.svg", 
           title="update", alt='', height=28, width=28} } }
-    local trash_can = p.id == "openLuup" and '' or delete_link ("plugin", p.id)
-    t.row {icon, p.Title, version, auto_update, files, 
-      xhtml.span{edit, help, info}, update, '', trash_can} 
+    
+    ignore.openLuup = ''
+    local src = p.Icon or ''
+    src  = src: gsub ("^/?plugins/", "http://apps.mios.com/plugins/")  -- http://apps.mios.com/plugin.php?id=...
+    local icon = xhtml.img {src=src, alt="no icon", height=35, width=35}
+    icon = ignore[p.id] and icon or xhtml.a {href=selfref "page=plugin&plugin="..p.id, title="edit", icon}
+    local trash_can = ignore[p.id] or delete_link ("plugin", p.id)
+    t.row {icon, p.Title, version, files, github, update, trash_can} 
   end
   local create = xhtml.a {class="w3-button w3-round w3-green", 
     href = selfref "page=plugin", "+ Create", title="create new plugin"}
+--  local appstore = xhtml.a {class="w3-button w3-round w3-amber", 
+--    href = selfref "page=app_store", "App Store", title="go to App Store"}
   return page_wrapper ("Plugins", create, t)
 end
+
+
+--
+-- APP Store
+--
+local APPS = {}
+local APP_loadtime = 0
+local database_creation_time = 0
+
+local function load_appstore ()
+  local timenow = os.time()
+  if #APPS > 0 and timenow < APP_loadtime + 24*60*60 then return end    -- update if older than 24 hours
+  _log "loading app database..."
+  local _,j = luup.inet.wget "https://raw.githubusercontent.com/akbooer/AltAppStore/data/J_AltAppStore.json"
+
+  local apps, errmsg = json.decode (j)
+  if errmsg then _log (errmsg) end
+  
+  if apps then
+    _log "...done"
+    APPS = {}
+    APP_loadtime = timenow
+    
+    for _, a in ipairs (apps) do
+      local reps = a.Repositories 
+      if type(reps) == "table" then
+        for _, rep in ipairs (reps) do
+          if rep.type == "GitHub" then
+            a.repository = rep          -- this is the GitHub repository
+            a.Repositories = nil        -- remove the others
+            APPS[#APPS+1] = a
+            APPS[tostring(a.id)] = a    -- add index by ID
+            break
+          end
+        end
+      else
+  --      print ("No Git", a.Title, tostring(reps), a.Title)
+      end
+    end
+  end
+
+  table.sort (APPS, function (a,b) return a.Title < b.Title end)
+  database_creation_time = (APPS[1] or {}) .loadtime or 0
+end
+
+function pages.app_json (p)
+  local readonly = true
+  local info = json.encode (APPS[p.plugin] or empty)
+  return page_wrapper ("Alt App Store - JSON definition",
+      xhtml.div {code_editor (info, 500, "json", readonly)})
+end
+
+-- info parameter is non-nil in the case of an install
+local function app_panel (app, info)
+  local icon = (app.Icon or ''): gsub ("^/?plugins/", "http://apps.mios.com/plugins/")
+--  print (app.Title, icon)
+  local title = app.Description or ''
+  local repository = app.repository
+  local source = repository.source or ''
+  local onclick = "alert ('%s')"
+  icon = xhtml.img {title=title, onclick = onclick: format(title),
+    src=icon, alt="no icon", height=64, width=64}
+  local GitHub_Mark = "https://raw.githubusercontent.com/akbooer/openLuup/development/icons/GitHub-Mark-64px.png"
+  local github = xhtml.a {href="https://github.com/"  .. source, target="_blank", class="w3-button w3-round",
+    xhtml.img {title="go to GitHub repository", src=GitHub_Mark, alt="GitHub", height=32, width=32} }
+  local jlink = xhtml.a {href=selfref ("page=app_json&plugin=" .. app.id), 
+    class="w3-button w3-round", title="view App Store JSON", "JSON"}
+
+  -- show releases
+  local choice = {style="width:12em;", name="release"} 
+  local versions = repository.versions
+  
+  local vs = {}
+  for _,x in pairs (versions) do vs[#vs+1] = tostring(x.release) end
+  table.sort (vs, function(a,b) return a > b end)
+  for _, release in ipairs (vs) do
+    choice[#choice+1] = xhtml.option {value=release, release} 
+  end
+
+  local panel = generic_panel ({
+    height = 90,
+    top_line = {
+      left = xhtml.span {truncate (app.Title)}, right = xhtml.select (choice)},
+    icon = xhtml.div {class="w3-padding-small w3-display-left ", icon },
+    body = {
+      topright = info,
+      bottomright = xhtml.div {jlink, github, 
+        xhtml.input {class="w3-button w3-round w3-border w3-green ", type="submit", value="Install" } } },
+      }, "app-panel")
+  
+  return xhtml.form {action=selfref(), method="POST",
+    xhtml.input {hidden=1, name="app", value=app.id},
+    panel}
+end
+
+function pages.app_store (p, req)
+  load_appstore()
+  
+  local function install_app (app, release)
+    local meta = {plugin = {} }
+    for n,v in pairs (app) do
+      if type (v) == "table" then -- for some reason the AltAppStore wrapped these to lowercase (@Vosmont??)
+        meta[n: lower()] = v
+      else
+        meta.plugin[n] = v
+      end
+    end
+    
+    -- some more fix-ups (this really is a mess due to committee decisions!)
+    meta.versions = nil
+    meta.versionid = release
+    meta.version = {major = "GitHub", minor = release}
+    
+    -- shallow copy the repository to preserve original for UI version selection
+    local repository = {}
+    for n,v in pairs (meta.repository) do repository[n] = v end
+    repository.versions = {[release] = {release = release}}  -- others are not relevant to the install
+    meta.repository = repository
+    
+    local metadata = json.encode (meta) 
+--    print (metadata)
+    
+    local sid = SID.appstore
+    local act = "update_plugin"
+    local arg = {metadata = metadata}
+    local dev
+    -- find the AltAppStore plugin
+    for devNo, d in pairs (luup.devices) do
+      if (d.device_type == "urn:schemas-upnp-org:device:AltAppStore:1") then
+        dev = devNo
+        break
+      end
+    end
+    
+    -- returns: error (number), error_msg (string), job (number), arguments (table)
+    local _, errmsg, _, a = luup.call_action (sid, act, arg, dev)       -- actual install
+--    print ((json.encode {e,errmsg,j,a}))
+    local result = json.encode (a or {ERROR = errmsg})
+    _log (result)
+    if errmsg then _log (errmsg) end
+    
+    -- NOTE: that the above action executes asynchronously and the function call
+    --       returns immediately, so you CAN'T do a luup.reload() here !!
+    --       (it's done at the end of the <job> part of the called action)
+    return result
+  end
+  
+  local q = req.POST
+  local install = q.app   -- request to install this app
+  local release = q.release
+  
+  -- construct letter groups index
+  local a_z = {"abc", "def", "ghi", "jkl","mno", "pqrs", "tuv", "wxyz"}
+  local All_Apps = "All Apps"
+  local a_z_idx = {}
+  local n_in_group = {}
+  for _, abc in ipairs (a_z) do
+    for letter in abc: gmatch "." do a_z_idx[letter] = abc end
+    n_in_group[abc] = 0
+  end
+
+  local wanted = p.abc_sort
+  local subset = xhtml.div{class = "w3=panel"}
+  for _, app in ipairs(APPS) do
+    local info
+    if app.id == install then info = "INSTALLING..." .. install_app (app, release) end
+    local letter = (app.Title or '') :sub(1,1) :lower()
+    local grp = a_z_idx[letter]
+    n_in_group[grp] = n_in_group[grp] + 1
+    if wanted == All_Apps or wanted == grp then
+      subset[#subset+1] = app_panel(app, info)
+    end
+  end
+  
+  local abc_menu = {xhtml.div{All_Apps, xhtml.span {class="w3-badge w3-right w3-red", #APPS} } }
+  for _, abc in ipairs (a_z) do
+    abc_menu[#abc_menu+1] = 
+      xhtml.div{abc, xhtml.span {class="w3-badge w3-right w3-dark-grey", n_in_group[abc]} } 
+  end
+  
+  local function service_menu () return filter_menu (abc_menu, wanted, "abc_sort=") end
+  local sortmenu = sidebar (p, service_menu)
+  local rdiv = xhtml.div {sortmenu, xhtml.div {class="w3-rest w3-panel", subset } }
+  
+  return page_wrapper ("Alt App Store (as of " .. todate(database_creation_time) .. ')', rdiv)
+end
+
+function pages.luup_files (p)
+  local fnames = setmetatable ({}, {__index = function (x,a) local t={} rawset(x,a,t) return t end})
+  local function add(a, f) fnames[a][#fnames[a]+1] = f end
+  for f in loader.dir() do
+    local letter, extension = f: match "^(%a)_.+%.(%a+)$"
+    if letter then
+      add ('a', f)
+      add (letter: match "[DIJLS]" and letter or 'o', f)                      -- 'o' is "other"
+      if letter == 'D' then add (extension == "xml" and 'x' or 'j', f) end    -- assume .json if not .xml
+    end
+  end
+  
+  local ftype = p.filetype or "All"
+  local filetypes = {"All", "D_.*", "D_.xml", "D_.json",
+    "I_.xml", "J_.js", "L_.lua", "S_.xml", "other"}
+  local index = {'a', 'D', 'x', 'j','I', 'J', 'L', 'S', 'o'}
+  
+  local class = "w3-badge w3-right w3-red"
+  local f_menu = {} 
+  local selected = 'a'
+  for i, f in ipairs (filetypes) do
+    local idx = index[i]
+    if f == ftype then selected = idx end
+    f_menu[#f_menu+1] = 
+      xhtml.div {f, xhtml.span {class=class, #fnames[idx]} } 
+      class = "w3-badge w3-right w3-dark-grey"
+  end
+  local function file_menu () return filter_menu (f_menu, ftype, "filetype=") end
+  local typemenu = sidebar (p, file_menu)
+  
+  fnames = fnames[selected]     -- pick the group we want
+  for i, f in ipairs(fnames) do
+    fnames[i] = xhtml.a {href=selfref ("page=viewer&file="..f), f}   -- single element
+  end
+  local n = math.floor((#fnames+1) / 2)
+  for i = 1,n do
+    fnames[i] = {fnames[i], fnames[i+n]}     -- two column rows
+  end
+  fnames[n+1] = nil
+  local t = create_table_from_data ({{colspan=2, "filename (click to view)"}}, fnames)
+  local rdiv = xhtml.div {typemenu, xhtml.div {class="w3-rest w3-panel", t } }
+  return page_wrapper ("Luup files", rdiv)  
+end
+
+-- command line
+function pages.command_line (_, req)
+  local output
+  local command = req.POST.command
+  if command then
+    local f = io.popen (command)
+    if f then output = f: read "*a"
+      f: close()
+    end
+  end
+  local h = xhtml
+  local window = h.div {
+    html5_title ("Output: ", h.span {style="font-family:Monaco; font-size:11pt;", command} ),
+    h.pre {style="height: 500px; border:1px grey; background-color:white; overflow:scroll", output} }
+  local form = h.form {action= selfref (), method="post",
+    h.input {class="w3-button w3-round w3-green w3-margin", value="Submit", type = "submit"},
+    h.input {type = "text", style="width: 80%;", name ="command", 
+      autocomplete="off", placeholder="command line", autofocus=1}}
+  return h.div {class="w3-container", window, form}
+end
+
+-----
 
 function pages.about () 
   local function embedded_links (t)   -- replace embedded http reference with real links
@@ -2707,7 +3073,6 @@ function pages.about ()
     for i = 2,#s,2 do s[i] = xhtml.a {href=s[i], target="_blank", s[i]} end  -- add link
     return s
   end
-  local ABOUTopenLuup = luup.devices[2].environment.ABOUT   -- use openLuup about, not console
   local t = xhtml.table {class = "w3-table-all w3-cell w3-card"}
   for a,b in sorted (ABOUTopenLuup) do
     t.row { xhtml.b {a},  xhtml.pre (embedded_links(b))}
@@ -2770,9 +3135,7 @@ function pages.home (p)
     xhtml.h4 {"Page Index"}, div(index)} 
 end
 
-
 local function page_nav (current, previous)
-  local pagename = capitalise (current)
 --  local onclick="document.getElementById('messages').style.display='block'" 
   local messages = div (xhtml.div {class="w3-button w3-round w3-border", "Messages ▼ "})
   messages.onclick="ShowHide('messages')" 
@@ -2782,10 +3145,7 @@ local function page_nav (current, previous)
 --       nice (os.time()), ' ', "Click on the X to close this panel" }
   local tabs, groupname = page_group_buttons (current)
   return div {class="w3-container w3-row w3-margin-top",
-    xhtml.span {class = "w3-container w3-cell w3-cell-middle w3-round w3-border w3-border-grey",
-          a {class="nodec", href = selfref ("page=", previous), unicode.leftwards_double_arrow}, " / ", 
-          a {class="nodec", href = selfref "page=home", "Home"},     " / ", 
-          pagename}, 
+      page_tree (current, previous), 
       div {class="w3-container w3-cell", messages},
       div {class = "w3-panel w3-border w3-hide", id="messages",  
         "hello",
@@ -2851,7 +3211,8 @@ function run (wsapi_env)
   if page_groups[P] then p.page = page_groups[P][1] end     -- replace group name with first page in group
   
   local cookies = {page = "about", previous = "about",      -- cookie defaults
-    device = "2", scene = "1", room = "All Rooms", dev_sort = "Sort by Name", scn_sort = "All Scenes"}
+    device = "2", scene = "1", room = "All Rooms", 
+    abc_sort="abc", dev_sort = "Sort by Name", scn_sort = "All Scenes"}
   for cookie in pairs (cookies) do
     if p[cookie] then 
       res: set_cookie (cookie, p[cookie])                   -- update cookie with URL parameter
@@ -2878,13 +3239,16 @@ function run (wsapi_env)
   local donate = xhtml.a {
     title = "If you like openLuup, you could DONATE to Cancer Research UK right here",
     href="https://www.justgiving.com/DataYours/", target="_blank", " [donate] "}
+  local forum = xhtml.a {class = "w3-text-blue",
+    title = "An independent place for smart home users to share experience", 
+    href=ABOUTopenLuup.FORUM, target="_blank", " [smarthome.community] "}
                 
   body = {
     static_menu,
     h.div {
       formatted_page,
       h.div {class="w3-footer w3-small w3-margin-top w3-border-top w3-border-grey", 
-        h.p {style="padding-left:4px;", os.date "%c", ', ', VERSION, donate} }
+        h.p {style="padding-left:4px;", os.date "%c", ', ', VERSION, donate, forum} }
     }}
   
   h.documentElement[1]:appendChild {  -- the <HEAD> element
@@ -2901,8 +3265,12 @@ function run (wsapi_env)
     .scn-panel {width:240px; float:left; }
     .tim-panel {width:240px; float:left; }
     .trg-panel {width:240px; float:left; }
+    .app-panel {width:320px; float:left; }
     .top-panel {background:LightGrey; border-bottom:1px solid Grey; margin:0; padding:4px;}
+    .top-panel-red {background:IndianRed; border-bottom:1px solid Grey; margin:0; padding:4px;}
     .top-panel-blue {background:LightBlue; border-bottom:1px solid Grey; margin:0; padding:4px;}
+    .top-panel-cyan {background:PaleTurquoise; border-bottom:1px solid Grey; margin:0; padding:4px;}
+    .top-panel-green {background:LightGreen; border-bottom:1px solid Grey; margin:0; padding:4px;}
   ]]},
     
     h.script {
